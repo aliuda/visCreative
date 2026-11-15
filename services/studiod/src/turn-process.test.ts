@@ -95,7 +95,7 @@ describe('Turn process trees', () => {
           })()
           return Object.assign(iterator, { interrupt: () => new Promise<void>(() => {}) }) as unknown as ReturnType<QueryFn>
         }
-        runtime = createClaudeRuntime(ctx, { ...common, query, cliBinDir: dir })
+        runtime = createClaudeRuntime(ctx, { ...common, query, cliBinDir: dir, env: { ...common.env, CLAUDE_CONFIG_DIR: dir } })
       }
       sessions = createSessionService({ db, runtime })
       cleanups.push(async () => { sessions.dispose(); await runtime.dispose(); db.$client.close(); rmSync(dir, { recursive: true, force: true }) })

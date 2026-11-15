@@ -1,4 +1,7 @@
 import { mkdirSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Options, Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { SpaceDb } from '@vis/storage'
 import { agentPath, type AgentEvent, type AgentRuntimePort, type ChildLike, DispatchError, exitInstance, killTree, markInstanceReady, spawnAgentProcess, startTurnInstance } from '@vis/workbench-core'
@@ -8,6 +11,16 @@ import { translate } from './translate'
 /** 0004 "Claude Adapter": allow vis and read-only tools; reject all others without approval prompts */
 export const TOOLS = ['Bash', 'Read', 'Glob', 'Grep']
 export const ALLOWED_TOOLS = ['Bash(vis:*)', 'Read', 'Glob', 'Grep']
+
+// Claude also needs these explicit keys for OAuth and cloud-provider authentication.
+const CLAUDE_AUTH_ENV_KEYS = new Set([
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'AWS_REGION',
+  'AWS_PROFILE',
+  'CLOUD_ML_REGION',
+])
 
 export type QueryFn = (params: { prompt: string; options?: Options }) => Query
 
@@ -28,7 +41,31 @@ export type ClaudeRuntimeOptions = {
   /** Grace period for Agent cleanup after interruption; abort immediately on timeout */
   interruptGraceMs?: number
   env?: Record<string, string | undefined>
+  platform?: NodeJS.Platform
   now?: () => number
+}
+
+async function settingsEnv(env: Record<string, string | undefined>, platform: NodeJS.Platform): Promise<Record<string, string>> {
+  try {
+    const home = env.HOME ?? (platform === 'win32' ? env.USERPROFILE : undefined) ?? homedir()
+    const configured = env.CLAUDE_CONFIG_DIR
+    const configDir = !configured ? join(home, '.claude')
+      : configured === '~' ? home
+      : configured.startsWith('~/') ? join(home, configured.slice(2))
+      : configured
+    const settings: unknown = JSON.parse(await readFile(join(configDir, 'settings.json'), 'utf8'))
+    if (!settings || typeof settings !== 'object' || !('env' in settings)) return {}
+    const values = settings.env
+    if (!values || typeof values !== 'object' || Array.isArray(values)) return {}
+    const result: Record<string, string> = {}
+    for (const [key, value] of Object.entries(values)) {
+      if ((/^ANTHROPIC_/.test(key) || CLAUDE_AUTH_ENV_KEYS.has(key)) && typeof value === 'string') result[key] = value
+    }
+    return result
+  } catch {
+    // Settings are optional; parse and filesystem errors may contain credentials.
+    return {}
+  }
 }
 
 type Run = {
@@ -114,8 +151,9 @@ export function createClaudeRuntime(
       startups.add(startup)
       try {
         const env = { ...(opts.env ?? process.env) }
+        const platform = opts.platform ?? process.platform
         // Windows environment keys are case-insensitive; avoid passing both Path and PATH to child processes.
-        if (process.platform === 'win32') {
+        if (platform === 'win32') {
           const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path')
           const path = pathKey ? env[pathKey] : undefined
           for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
@@ -123,6 +161,8 @@ export function createClaudeRuntime(
         }
         let q: Query
         try {
+          const authEnv = await settingsEnv(env, platform)
+          if (abort.signal.aborted || disposed) throw new Error('Runtime has stopped')
           q = opts.query({
             prompt: buildPrompt(input),
             options: {
@@ -153,6 +193,7 @@ export function createClaudeRuntime(
               systemPrompt: { type: 'preset', preset: 'claude_code', append: systemAppend(input.workContext) },
               env: {
                 ...env,
+                ...authEnv,
                 PATH: agentPath({ cliBinDir: opts.cliBinDir, fallbackDirs: opts.fallbackDirs, base: env.PATH }),
                 VIS_SOCKET: opts.socketPath,
                 VIS_AGENT_TOKEN: token,

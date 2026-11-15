@@ -231,6 +231,14 @@ Claude moves to the same model as Codex and dsh:
 
 If (2), the token is stored by the app in the system credential store under `vis-creative.agent` / `claude` (never in a file, database or log), read by studiod at launch and passed only to the Claude process environment. That is the same exposure Codex has to `~/.codex/auth.json`: an agent may read its own credential, never another agent's or a provider key. If neither works, Claude stays in restricted mode on macOS and this RFC records why. S0 comes first in that RFC.
 
+### Implementation note: settings environment authentication (2026-11-15)
+
+The current restricted Claude adapter keeps `settingSources: []` so user `CLAUDE.md`, settings, hooks and skills cannot change project sessions or their permissions. At each turn dispatch, studiod asynchronously reads the `env` object in the user's Claude settings and forwards only string-valued `ANTHROPIC_*` keys plus `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_REGION`, `AWS_PROFILE` and `CLOUD_ML_REGION`. The explicit list supports OAuth and cloud-provider authentication. Model keys under `ANTHROPIC_*` are forwarded intentionally: proxy users need these model mappings, matching the Claude Code CLI. No other settings or environment keys from the file are forwarded.
+
+The file is `$CLAUDE_CONFIG_DIR/settings.json` when that source environment variable is nonempty, otherwise `<home>/.claude/settings.json`. A config directory of `~` or starting with `~/` expands against that home. Home resolution uses the injected source environment's `HOME`, then `USERPROFILE` on Windows, then `os.homedir()`. Settings values win over studiod environment values, including empty or undefined exports, matching Claude Code; this keeps exports from replacing the settings credentials paired with a proxy URL. Adapter-owned environment keys still win over both. Missing, unreadable or invalid settings are ignored silently, and settings values are never logged or included in errors. Claude receives its own authentication environment, the same exposure model as Codex reading its own `~/.codex`; other agents remain unable to read Claude Code's credentials.
+
+The S0 Keychain and sandbox question above remains open until Claude is wired into `prepareSandbox`. At that point the forwarded authentication token must remain reachable inside the sandbox; this environment fallback does not settle the Keychain isolation question or broaden the current tools and permissions.
+
 
 ## Open questions
 

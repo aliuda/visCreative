@@ -1,5 +1,12 @@
 # Agent lessons
 
+## Claude settings authentication needs an explicit environment fallback
+
+- **Symptom:** Claude asks to log in inside visCreative even though Claude Code already authenticates on its own.
+- **Cause:** `settingSources: []` intentionally excludes user settings, including authentication supplied through the `env` block of `settings.json`.
+- **Instead:** asynchronously reread the user's settings at every turn and forward only string-valued `ANTHROPIC_*` keys plus `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_REGION`, `AWS_PROFILE` and `CLOUD_ML_REGION`, keeping settings sources disabled. Settings values must override exports, including empty or undefined values, to match Claude Code and avoid exported credentials replacing settings credentials paired with a proxy URL. Keep model mappings under `ANTHROPIC_*`, expand `~` in the config directory, treat an empty config directory as unset, and resolve home from source `HOME`, then Windows `USERPROFILE`, then the system home. Ignore read and parse failures silently so credentials never enter errors or logs; tests must use temporary configuration directories.
+- **Found in:** [RFC 0026 settings environment authentication](../rfc/0026-agent-instructions.md#implementation-note-settings-environment-authentication-2026-11-15), `packages/workbench/claude/src/adapter.ts`.
+
 ## Reference chip numbers must match the vendor's media order
 
 - **Symptom:** a mixed image/video prompt sent the first video as video 2, with spaces and no Seedance 2.5 reference prefix.

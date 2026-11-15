@@ -1,7 +1,8 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { mkdtempSync, rmSync } from 'node:fs'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { openSpaceDb, spaceSchema as s } from '@vis/storage'
 import { createSessionService, killTree } from '@vis/workbench-core'
 import { createClaudeRuntime, type QueryFn } from './adapter'
@@ -10,6 +11,10 @@ vi.mock('@vis/workbench-core', async importOriginal => {
   const core = await importOriginal<typeof import('@vis/workbench-core')>()
   return { ...core, killTree: vi.fn(core.killTree) }
 })
+
+let configDir: string
+beforeEach(() => { configDir = mkdtempSync(join(tmpdir(), 'vis-claude-disposal-')) })
+afterEach(() => { rmSync(configDir, { recursive: true, force: true }) })
 
 it('termination and concurrent disposal wait for the delayed consumer to record the turn', async () => {
   const db = openSpaceDb(':memory:')
@@ -29,6 +34,7 @@ it('termination and concurrent disposal wait for the delayed consumer to record 
   const runtime = createClaudeRuntime({ db, report: event => { if (event.type === 'turn_ended') events.push(event.status) } }, {
     query, workDir: () => join(tmpdir(), 'vis-delayed-claude'), cliBinDir: tmpdir(), socketPath: 'unused',
     issueToken: () => ({ token: 'fake', tokenHash: 'fake' }),
+    env: { CLAUDE_CONFIG_DIR: configDir },
   })
   const sessions = createSessionService({ db, runtime })
   const session = sessions.create({ requestId: 'session' })
@@ -68,6 +74,7 @@ it('disposal waits for an already-finishing consumer whose tree kill is delayed'
   }
   const runtime = createClaudeRuntime({ db, report: event => { if (event.type === 'turn_ended') events.push(event.status) } }, {
     query, workDir: () => tmpdir(), cliBinDir: tmpdir(), socketPath: 'unused', issueToken: () => ({ token: 'fake', tokenHash: 'fake' }),
+    env: { CLAUDE_CONFIG_DIR: configDir },
   })
   const sessions = createSessionService({ db, runtime })
   const session = sessions.create({ requestId: 'session' })
