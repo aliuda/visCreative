@@ -8,5 +8,13 @@ export const claudeDescriptor: AgentDescriptor = {
   install: { hint: { zh: '请安装并配置 Claude Code 后重试', en: 'Install and configure Claude Code, then retry' }, command: 'npm install -g @anthropic-ai/claude-code' },
   envPassthrough: [],
   forbiddenPaths: ['~/.claude', '~/.claude.json', '~/.claude.json.*'],
-  capabilities: { resume: true, interrupt: true, models: false, effort: false, approvals: false },
+  capabilities: { resume: true, interrupt: true, models: true, effort: true, approvals: true },
+}
+
+export const claudeSandbox = {
+  envPassthrough: claudeDescriptor.envPassthrough,
+  forbiddenPaths: claudeDescriptor.forbiddenPaths,
+  runtimeDirectory: 'agents/claude',
+  runtimeHomeVariable: 'CLAUDE_CONFIG_DIR',
+  dataRuntimeDirectory: 'agents/claude' as const,
 }

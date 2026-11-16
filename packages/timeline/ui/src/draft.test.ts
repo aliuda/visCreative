@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { NodeView, TimelineDoc } from '@vis/protocol'
 import type { TimelineEditorHost } from './types'
 import { createTimelineDraft } from './draft'
+import { editPlacement } from './overlay/placement'
 
 const doc = (name = 'Initial'): TimelineDoc => ({ version: 1, tracks: [{ id: 'video', kind: 'video', name, muted: false, volume: 1, clips: [] }] })
 const node = (document = doc(), revision = 1): NodeView => ({
@@ -233,4 +234,20 @@ describe('timeline draft saves', () => {
     expect(h.commit).not.toHaveBeenCalled()
     controller.dispose()
   })
+  it('keeps rounded placement no-ops out of undo history and saves', () => {
+    const overlay = { x: 0.5000000000001, y: 0.123, width: 0.25, opacity: 1 }
+    const clip = { id: 'clip', source: { nodeId: 'source', assetVersionId: 'asset' }, startMs: 0, inMs: 0, outMs: 1000, volume: 1, fadeInMs: 0, fadeOutMs: 0, overlay }
+    const initial: TimelineDoc = { version: 1, tracks: [{ id: 'overlay', kind: 'overlay', muted: false, volume: 1, clips: [clip] }] }
+    const h = host()
+    h.node = node(initial)
+    const controller = createTimelineDraft(h)
+    const next = editPlacement(overlay, { x: 0.5 }, 500, clip).placement!
+    expect(next).toBe(overlay)
+    controller.getSnapshot().edit({ ...initial, tracks: [{ ...initial.tracks[0]!, clips: [{ ...clip, overlay: next }] }] }, { immediate: true })
+    expect(controller.getSnapshot().canUndo).toBe(false)
+    expect(controller.getSnapshot().saveState).toBe('saved')
+    expect(h.commit).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
 })

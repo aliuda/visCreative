@@ -16,6 +16,22 @@ import { scene, SceneChange, SceneProposal, SceneObjectContent, SceneViewContent
 describe('protocol', () => {
   const hostingConfig = { type: 'tos', region: 'cn-beijing', bucket: 'reference-clips', accessKeyId: 'example-access-key', prefix: 'vis-creative/refs/' }
 
+  it('returns specific transform validation messages for timeline writes (RFC 0050)', () => {
+    const key = <T>(t: number, value: T) => ({ t, value, ease: 'linear' })
+    const clip = { id: 'clip', source: { nodeId: 'source', assetVersionId: 'asset' }, startMs: 0, inMs: 0, outMs: 4000, volume: 1, fadeInMs: 0, fadeOutMs: 0 }
+    const cases = [
+      { kind: 'video', clip: { ...clip, crop: { keys: [key(0, { x: 0, y: 0, width: 1, height: 1 }), key(4000, { x: 0, y: 0, width: 0.5, height: 1 })] } }, message: 'crop keys must keep one aspect ratio' },
+      { kind: 'overlay', clip: { ...clip, overlay: { x: { keys: Array.from({ length: 33 }, (_, i) => key(i * 100, 0.5)) }, y: 0.5, width: 0.2, opacity: 1 } }, message: 'Too big: expected array to have <=32 items' },
+    ]
+    for (const test of cases) {
+      const result = METHODS['canvas.apply'].params.safeParse({ requestId: 'transform-validation', ops: [{ op: 'timeline.set', slotId: 'timeline-slot', expectedRevision: 1,
+        doc: { version: 1, tracks: [{ id: 'track', kind: test.kind, muted: false, volume: 1, clips: [test.clip] }] },
+      }] })
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.error.message).toContain(test.message)
+    }
+  })
+
   it('accepts model doc links only as public HTTPS pages of a known kind (RFC 0045)', () => {
     expect(ModelDocLink.parse({ kind: 'prompt_guide', url: 'https://docs.example.com/guide' })).toEqual({ kind: 'prompt_guide', url: 'https://docs.example.com/guide' })
     for (const url of ['http://docs.example.com/guide', 'https://localhost/guide', 'https://127.0.0.1/guide', 'javascript:alert(1)', 'file:///etc/hosts']) {

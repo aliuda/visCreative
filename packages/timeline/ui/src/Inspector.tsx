@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { clipDurationMs, isMainVideoTrack, isOverlayTrack, sourceTimeAt, type TimelineOutput, type TimelineTrackKind } from '@vis/protocol'
+import { clipDurationMs, sourceTimeAt, isMainVideoTrack, isOverlayTrack, type TimelineClip, type TimelineOutput, type TimelineTrackKind } from '@vis/protocol'
 import { useFormat, useMessages } from '@vis/ui-kit'
 import type { EditorPartProps } from './types'
 import { TextInspector } from './text/TextInspector'
@@ -9,7 +9,7 @@ import { latestExport, nodeAsset, trackSourceKind } from './model/media'
 import { parseTimecode, timecode } from './model/geometry'
 import { useMediaResources } from './model/resources'
 import { effectiveFps, outputFrame, outputFrameRates, outputWithFps, presetFps } from './model/output'
-import { boundedPlacement, presetPlacement, type PlacementPreset } from './overlay/placement'
+import { TransformInspector } from './TransformInspector'
 import './timeline-area.css'
 
 function CommitField({ label, value, disabled, commit, type = 'text', min, max, step, unit }: {
@@ -18,7 +18,7 @@ function CommitField({ label, value, disabled, commit, type = 'text', min, max, 
   const [text, setText] = useState(value)
   useEffect(() => { setText(value) }, [value])
   return <label className="vis-tl-field"><span>{label}{unit ? ` (${unit})` : ''}</span><input aria-label={label} value={text} type={type} min={min} max={max} step={step ?? (type === 'number' ? 'any' : undefined)} disabled={disabled}
-    onChange={event => setText(event.target.value)} onBlur={() => { if (text !== value) commit(text) }}
+    onChange={event => setText(event.target.value)} onBlur={() => { if (!disabled && text !== value) commit(text) }}
     onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setText(value); event.stopPropagation() } }} /></label>
 }
 
@@ -40,7 +40,7 @@ export function OutputSettings({ host, draft, onDone }: EditorPartProps & { onDo
   const output = draft.doc.output
   const first = draft.doc.tracks.find(isMainVideoTrack)?.clips[0]
   const resources = useMediaResources(host, first ? [first.source.assetVersionId] : [])
-  const firstInfo = first ? resources.info.get(first.source.assetVersionId) : undefined
+  const firstInfo = first ? resources.resolvedInfo(first.source.assetVersionId) : undefined
   const fps = presetFps(output, firstInfo)
   const frameRates = outputFrameRates(output, firstInfo)
   const selectedFps = effectiveFps(output, firstInfo)
@@ -74,6 +74,7 @@ export function Inspector(props: EditorPartProps) {
   const f = useFormat()
   const [error, setError] = useState('')
   const entry = selection[0] ? locateClip(draft.doc, selection[0]) : null
+  const overlay = entry && isOverlayTrack(entry.track) ? entry.clip.overlay : undefined
   const source = entry ? host.nodes.find(node => node.nodeId === entry.clip.source.nodeId) : undefined
   const asset = source ? nodeAsset(source) : null
   const exported = latestExport(host.nodes, host.node.nodeId)
@@ -81,13 +82,13 @@ export function Inspector(props: EditorPartProps) {
   const first = draft.doc.tracks.find(isMainVideoTrack)?.clips[0]
   const ids = [first?.source.assetVersionId, entry?.clip.source.assetVersionId, asset?.assetVersionId, exportAsset?.assetVersionId].filter((id): id is string => !!id)
   const resources = useMediaResources(host, ids)
-  const sourceKind = entry ? resources.info.get(entry.clip.source.assetVersionId)?.kind ?? source?.kind : undefined
+  const sourceKind = entry ? resources.resolvedInfo(entry.clip.source.assetVersionId)?.kind ?? source?.kind : undefined
   const apply = (result: EditResult) => {
     if (result.ok) { const refused = draft.edit(result.doc, { immediate: true }); setError(refused ? m[refused] : result.boundHit ? m.bound : '') }
     else setError(m[result.reason])
   }
   const disabled = !!draft.conflict
-  const fps = effectiveFps(draft.doc.output, first ? resources.info.get(first.source.assetVersionId) : undefined)
+  const fps = effectiveFps(draft.doc.output, first ? resources.resolvedInfo(first.source.assetVersionId) : undefined)
   const tc = (ms: number) => timecode(ms, fps, f.number)
   const timeInput = (value: string, callback: (ms: number) => void) => {
     const ms = parseTimecode(value, fps)
@@ -95,11 +96,10 @@ export function Inspector(props: EditorPartProps) {
     else callback(ms)
   }
   const newer = entry && asset && asset.assetVersionId !== entry.clip.source.assetVersionId
-  const overlay = entry && isOverlayTrack(entry.track) ? entry.clip.overlay : undefined
-  const firstInfo = first ? resources.info.get(first.source.assetVersionId) : undefined
-  const sourceInfo = entry ? resources.info.get(entry.clip.source.assetVersionId) : undefined
+  const firstInfo = first ? resources.resolvedInfo(first.source.assetVersionId) : undefined
+  const sourceInfo = entry ? resources.resolvedInfo(entry.clip.source.assetVersionId) : undefined
   const output = outputFrame(draft.doc.output, firstInfo)
-  const aspect = sourceInfo?.width && sourceInfo.height ? sourceInfo.width / sourceInfo.height : 1
+  const rawAspect = sourceInfo?.width && sourceInfo.height ? sourceInfo.width / sourceInfo.height : 1
   const trackName = (kind: TimelineTrackKind, index: number, name?: string) => name ?? (kind === 'video' ? m.video : kind === 'overlay' ? m.overlay(f.number(index + 1)) : [m.music, m.soundEffects, m.voice][index] ?? m.audio(f.number(index + 1)))
   const textClip = !entry && selection.length === 1 && draft.doc.textTracks?.some(track => track.clips.some(clip => clip.id === selection[0]))
   if (textClip) return <TextInspector {...props} clipId={selection[0]!} />
@@ -110,26 +110,14 @@ export function Inspector(props: EditorPartProps) {
       <div className="vis-tl-source"><span>{m.source}</span><button type="button" disabled={!source} onClick={() => host.showOnCanvas(entry.clip.source.nodeId)}>
         {source?.title ?? (source ? source.kind === 'audio' ? m.audioKind : source.kind === 'image' ? m.image : m.video : m.sourceDeleted)} <span aria-hidden="true">&#8599;</span>
       </button></div>
-      {resources.info.get(entry.clip.source.assetVersionId)?.version !== undefined && <small className="vis-tl-pinned">{m.pinnedVersion(`v${f.number(resources.info.get(entry.clip.source.assetVersionId)!.version!)}`)}</small>}
+      {resources.resolvedInfo(entry.clip.source.assetVersionId)?.version !== undefined && <small className="vis-tl-pinned">{m.pinnedVersion(`v${f.number(resources.resolvedInfo(entry.clip.source.assetVersionId)!.version!)}`)}</small>}
       {!source && <p className="vis-tl-notice">{m.sourceDeleted}</p>}
-      {newer && <div className="vis-tl-notice">{m.newVersion}<button disabled={disabled || !resources.info.has(asset.assetVersionId)} onClick={() => apply(useNewVersion(draft.doc, entry.clip.id, asset.assetVersionId, { kind: source!.kind as 'video' | 'image' | 'audio', durationMs: resources.info.get(asset.assetVersionId)?.durationMs }))}>{m.useNewVersion}</button></div>}
+      {newer && <div className="vis-tl-notice">{m.newVersion}<button disabled={disabled || !resources.info.has(asset.assetVersionId)} onClick={() => apply(useNewVersion(draft.doc, entry.clip.id, asset.assetVersionId, { kind: source!.kind as 'video' | 'image' | 'audio', durationMs: resources.resolvedInfo(asset.assetVersionId)?.durationMs }))}>{m.useNewVersion}</button></div>}
+      {(entry.track.kind === 'video' || overlay) && <TransformInspector key={entry.clip.id} {...props} clip={entry.clip} sourceAspect={sourceInfo?.width && sourceInfo.height ? rawAspect : undefined} output={output} />}
       <fieldset disabled={disabled}>
-        {overlay && <>
-          {(['x', 'y', 'width', 'opacity'] as const).map(key => <CommitField key={key} label={key === 'x' ? m.overlayX : key === 'y' ? m.overlayY : key === 'width' ? m.overlaySize : m.opacity} unit={m.percent('')} type="number" min={key === 'width' ? 2 : 0} max={100} step={key === 'opacity' ? 1 : 0.1} value={String(Math.round(overlay[key] * 1000) / 10)} commit={value => {
-            const n = Number(value)
-            if (!Number.isFinite(n)) { setError(m.invalid); return }
-            apply(updateClip(draft.doc, entry.clip.id, { overlay: boundedPlacement({ ...overlay, [key]: n / 100 }) }))
-          }} />)}
-          <select className="vis-tl-overlay-presets" aria-label={m.overlayPlacement} value="" disabled={!sourceInfo?.width || !sourceInfo.height} onChange={event => {
-            apply(updateClip(draft.doc, entry.clip.id, { overlay: presetPlacement(overlay, event.target.value as PlacementPreset, aspect, output) }))
-          }}>
-            <option value="" disabled>{m.overlayPlacement}</option>
-            {(['topLeft', 'topRight', 'bottomLeft', 'bottomRight', 'centre', 'fullWidth'] as const).map(preset => <option key={preset} value={preset}>{m[preset]}</option>)}
-          </select>
-        </>}
-        <CommitField label={m.in} value={tc(entry.clip.inMs)} disabled={sourceKind === 'image'} commit={value => timeInput(value, ms => apply(trimClip(draft.doc, entry.clip.id, 'in', ms, { kind: sourceKind === 'image' ? 'image' : trackSourceKind(entry.track.kind), durationMs: resources.info.get(entry.clip.source.assetVersionId)?.durationMs })))} />
-        <CommitField label={m.out} value={tc(entry.clip.outMs)} commit={value => timeInput(value, ms => apply(trimClip(draft.doc, entry.clip.id, 'out', ms, { kind: sourceKind === 'image' ? 'image' : trackSourceKind(entry.track.kind), durationMs: resources.info.get(entry.clip.source.assetVersionId)?.durationMs })))} />
-        <CommitField label={m.length} value={tc(clipDurationMs(entry.clip))} commit={value => timeInput(value, ms => apply(trimClip(draft.doc, entry.clip.id, 'out', Math.round(sourceTimeAt(entry.clip, entry.clip.startMs + ms)), { kind: sourceKind === 'image' ? 'image' : trackSourceKind(entry.track.kind), durationMs: resources.info.get(entry.clip.source.assetVersionId)?.durationMs })))} />
+        <CommitField label={m.in} value={tc(entry.clip.inMs)} disabled={sourceKind === 'image'} commit={value => timeInput(value, ms => apply(trimClip(draft.doc, entry.clip.id, 'in', ms, { kind: sourceKind === 'image' ? 'image' : trackSourceKind(entry.track.kind), durationMs: resources.resolvedInfo(entry.clip.source.assetVersionId)?.durationMs })))} />
+        <CommitField label={m.out} value={tc(entry.clip.outMs)} commit={value => timeInput(value, ms => apply(trimClip(draft.doc, entry.clip.id, 'out', ms, { kind: sourceKind === 'image' ? 'image' : trackSourceKind(entry.track.kind), durationMs: resources.resolvedInfo(entry.clip.source.assetVersionId)?.durationMs })))} />
+        <CommitField label={m.length} value={tc(clipDurationMs(entry.clip))} commit={value => timeInput(value, ms => apply(trimClip(draft.doc, entry.clip.id, 'out', Math.round(sourceTimeAt(entry.clip, entry.clip.startMs + ms)), { kind: sourceKind === 'image' ? 'image' : trackSourceKind(entry.track.kind), durationMs: resources.resolvedInfo(entry.clip.source.assetVersionId)?.durationMs })))} />
         {(sourceKind === 'video' || sourceKind === 'audio') && <div className="vis-tl-speed">
           <CommitField label={m.speed} type="number" min={0.25} max={4} step={0.01} value={String(entry.clip.speed ?? 1)} commit={value => apply(setSpeed(draft.doc, entry.clip.id, Number(value), { kind: sourceKind }))} />
           <div className="vis-tl-speed-presets">{[0.5, 0.75, 1, 1.25, 1.5, 2].map(speed => <button key={speed} aria-pressed={(entry.clip.speed ?? 1) === speed} onClick={() => apply(setSpeed(draft.doc, entry.clip.id, speed, { kind: sourceKind }))}>{m.speedValue(f.number(speed))}</button>)}</div>

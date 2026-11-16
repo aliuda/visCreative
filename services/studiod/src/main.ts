@@ -103,6 +103,8 @@ const studiod = await startStudiod({
     { descriptor: claudeDescriptor, runtime: claudeRuntime({
       query,
       socketPath,
+      dataDir,
+      visMcp,
       env: agentCli.env,
       ...agentPaths,
       ...(process.env.VIS_CLAUDE_MODEL ? { model: process.env.VIS_CLAUDE_MODEL } : {}),

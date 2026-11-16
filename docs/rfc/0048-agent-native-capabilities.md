@@ -72,7 +72,7 @@ RFC 0015 §2 changes: in `auto`, an approval request of kind `network` that come
 
 ### 4. Claude adapter
 
-The adapter keeps its current tool list until it is wired into studiod. Wiring it requires, in this order: launching through `prepareSandbox` like Codex and the ACP agents, routing tool permissions through the shared approval path (`canUseTool` mapped to `command` / `file_write` / `network`), and only then widening `tools` to its native set (`Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`). That work is its own RFC step; this RFC records the rule so the restriction is not mistaken for a decision about taste.
+Implemented by [RFC 0026 §8](0026-agent-instructions.md#8-claude-code-implemented-2026-11-15) on 2026-11-15. Claude launches through `prepareSandbox`, routes native permissions through `canUseTool` and the shared approval service, and uses its native default tool set inside the macOS sandbox or on Windows. Read-only native WebFetch/WebSearch requests carry `webRead`, so `auto` treats them like the other agents' native web tools. Expanded Claude uses an owned `<dataDir>/agents/claude` config directory and disallows AskUserQuestion in favor of replies. Read/Glob/Grep run freely under Seatbelt; Windows permits workspace/project reads automatically and asks for other reads and Bash commands. Restricted fallback keeps only Read/Glob/Grep and vis MCP, restoring the real user config for unavailable isolation or macOS Keychain-only authentication, with a notice. S0 verified settings-environment authentication inside the sandbox; without environment authentication it failed with a sanitized authentication error.
 
 ### 5. Generation guide
 

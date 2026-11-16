@@ -226,7 +226,7 @@ flowchart LR
 
 会话区把连续的思考、计划和工具调用折叠成一个工作块，显示用时和工具数，展开可看完整步骤。生成结果以卡片留在工作块之外，可以预览、定位或引用。思考和计划内容取决于 Agent 适配器是否提供。
 
-输入框工具行可按会话选择模型与思考强度，可选项来自 Agent；选择「默认」沿用 Agent 默认。切换模型时不支持的强度会恢复默认，运行中修改从下一回合生效。
+输入框工具行可按会话选择模型与思考强度，可选项来自 Agent；选择「默认」沿用 Agent 默认。切换模型时不支持的强度会恢复默认，运行中修改从下一回合生效。 Claude 也支持会话与子会话的模型、思考强度设置：SDK 目录声明各模型支持的强度。目录读取失败会返回不可用错误，后续可重试；回合仍可使用已有设置或默认值。运行时按每次新读的认证设置哈希缓存目录。明确选择的会话模型优先于 `VIS_CLAUDE_MODEL`，再使用 SDK 默认值；`default` 别名表示沿用这些默认值。Claude 不提供速度档位。
 
 当你明确指定，或你编写的技能、工作流要求时，Agent 也可以设置直接子项的模型、思考强度和速度档位（RFC 0049）：先用 `work.agentOptions` 读取准确选项，再向 `work.dispatch` 传 `agentConfig`，或用 `work.setAgentConfig` 修改已有子项的主会话，最后通过 `work.get` 确认。省略设置时使用子项 Agent 的默认值；Agent 仍不能修改自己的会话设置。
 
@@ -250,7 +250,7 @@ flowchart LR
 
 **环境要求：** Node.js 24+、pnpm 10（通过 Corepack；Node 25 起不再自带 Corepack，需先运行 `npm install -g corepack`）、`PATH` 上有 `ffmpeg`/`ffprobe`（7 或更高版本）、Google Chrome（本机渲染与 e2e 测试需要）。要和 Agent 对话，需要已安装并登录 [Codex](https://github.com/openai/codex) 和/或 DeepSeek Harness（`dsh`）；visCreative 只负责启动它们，不打开它们的凭据文件。通过 `npx @deepseek-ai/dsh web` 安装的 DeepSeek 也能自动找到，无需全局安装；先自行运行一次完成安装和登录，visCreative 不会自动下载 dsh。
 
-Claude Code 认证会在每回合重新读取 `$CLAUDE_CONFIG_DIR/settings.json` 的 `env`，只转发字符串类型的 `ANTHROPIC_*`（含模型映射）、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK`、`CLAUDE_CODE_USE_VERTEX`、`AWS_REGION`、`AWS_PROFILE` 和 `CLOUD_ML_REGION`（目录未设置或为空时回退到 `~/.claude/settings.json`；开头的 `~` 会展开为主目录）。设置中的值覆盖已导出的环境变量，适配器自身的变量仍优先，用户指令、hooks 和其他设置仍不加载。
+Claude Code 认证会在每回合和运行时模型目录查询时重新读取 `$CLAUDE_CONFIG_DIR/settings.json` 的 `env`，只转发字符串类型的 `ANTHROPIC_*`（含模型映射）、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK`、`CLAUDE_CODE_USE_VERTEX`、`AWS_REGION`、`AWS_PROFILE`、`CLOUD_ML_REGION`、AWS 访问/密钥/会话/bearer 凭据、`GOOGLE_APPLICATION_CREDENTIALS`、HTTP(S)/NO_PROXY（含小写）及 `NODE_EXTRA_CA_CERTS`（目录未设置或为空时回退到 `~/.claude/settings.json`；开头的 `~` 会展开为主目录）。设置中的值覆盖已导出的环境变量，适配器自身的变量仍优先，用户指令、hooks 和其他设置仍不加载。Claude 通过 vis MCP 使用画布，在 macOS 沙箱内或 Windows 上保留原生工具并使用共享审批；macOS 仅有钥匙串登录或缺少沙箱时保留受限工具，并提示完整工具需要设置中的环境认证或 `CLAUDE_CODE_OAUTH_TOKEN`。完整工具使用 `CLAUDE_CONFIG_DIR=<dataDir>/agents/claude`，macOS 沙箱拒绝读取用户真实配置；受限回退恢复用户配置并禁用 Bash。旧恢复 ID 可能正常报错，需要新建会话。Windows 自动模式下 Bash 仍须审批，工作区/项目内读取自动放行，其他读取询问；问题写在回复里。vis 令牌仅放入 MCP 服务环境，不转发 GitHub 令牌。
 
 Windows 11 x64 工具链需要先安装 Python 3 和带「使用 C++ 的桌面开发」工作负载的 Visual Studio 构建工具：better-sqlite3 13.x 在本机编译。同时安装 ffmpeg，完成后重新打开终端以刷新 `PATH`：
 
@@ -273,7 +273,7 @@ pnpm dev:studiod
 pnpm dev:web
 ```
 
-macOS 上 Codex 与 dsh 使用外层沙箱：允许工作区写入和联网，禁止读取生成密钥、应用令牌和数据库。各 Agent 自己的配置目录仍可读写（含自身凭据：`CODEX_HOME` 或 `~/.dsh`），但读不到其他 Agent 的（`~/.codex`、`~/.dsh`、`~/.claude`、`~/.claude.json`）。Windows 上不加隔离沙箱，允许命令和写入；只在信任的项目里使用 Agent，详见安全说明。
+macOS 上 Codex、dsh 与通过环境变量认证的 Claude 使用外层沙箱：允许工作区写入和联网，禁止读取生成密钥、应用令牌和数据库。各 Agent 自己的配置目录仍可读写（含自身凭据：`CODEX_HOME`、`~/.dsh`，或 Claude 隔离的 `<dataDir>/agents/claude`），但读不到其他 Agent 的（`~/.codex`、`~/.dsh`、`~/.claude`、`~/.claude.json`）。Windows 上不加隔离沙箱，允许命令和写入；只在信任的项目里使用 Agent，详见安全说明。
 
 也可以不开浏览器，用终端客户端跑同一条链路：`pnpm dev:client`（输入 `/help` 查看命令）。
 
@@ -322,6 +322,7 @@ Seedance 2.0 和 Seedance 2.5（`doubao-seedance-2-5-260628`）支持视频参�
 - **变速**：0.25–4×，保持音调。
 - **转场**：任意切点可加交叉淡化或闪黑；转场让前后片段重叠，成片相应变短。
 - **叠加**：最多 2 条叠加轨，画在视频之上、文字之下，用于 Logo、贴纸和画中画视频。每个片段按中心位置、宽度和透明度摆放，可在检查器里调（六个摆放预设），也可在预览画面里直接拖动、缩放；淡入淡出作用于画面（视频还包括声音）。预览同时只播放一路叠加视频，超出时显示「预览受限」，导出包含全部叠加。
+- **画面变换**：主轨和叠加片段都可裁切画面，为裁切框、叠加位置、宽度和透明度设置素材时间关键帧；在编辑器中编辑关键帧菱形、缓动和裁切手柄，比例锁定随当前裁切框推导，显式选择在片段存在期间生效；预览与导出使用同一套变换计算。
 - **文字**：最多 2 条文字轨，有字幕、综艺花字、电影字幕、标题四种预设。可用四款内置字体（思源黑体、得意黑、霞鹜文楷、站酷快乐体），也可上传自己的 TTF/OTF，上传字体的授权由用户自己负责。「字幕联动」默认打开，字幕跟着所在的视频片段移动和删除。
 - **预览**：浏览器预览按导出用的字体和时间显示变速、转场和文字，像素上可能略有差异，以导出为准。
 - **导出**：用 ffmpeg 导出为普通视频或音频节点；只有文字时用黑底导出。
@@ -502,7 +503,7 @@ RFC 0010 升级保留历史事件与请求记录：旧游标重取当前快照�
 - [x] RFC 0021 节点组件（第四期 a）：图片、视频、音频节点的顶部工具条由操作目录驱动；不依赖服务商的 ffmpeg 本地处理以幂等后台任务执行并可撤销（裁剪、宫格切分、截取、抽帧、分离音频、自定义与智能切分、变速）；生成类操作只在服务商模型声明时出现；可编辑节点标题；视频控件收为一行、音频波形可拖动定位；输入面板支持带编号的参考引用。审查修复统一仅含素材的媒体引用编号，停止会话或回收时取消媒体任务，按发起轮次校验写回，瞬时推送进度，并兼容图片方向与微小时长差异。生成面板和剧本提示词中的 `@` 可搜索已连接的参考素材，以及「画布上」分组里兼容的未连接素材（包括隐藏的工作节点）。选择画布素材会先连接，再插入编号标签；删除标签不会断开连接。画布结果按层级从上到下最多显示 50 个匹配项，超出时提示缩小搜索范围，达到模型参考数量上限时禁用相应候选项。
 - [x] RFC 0023 脚本节点第一步（4b-1）：脚本节点装一张可编辑的分镜表（按行冲突、撤销、导出）；人物、场景、道具作为共享资产并可挂参考图；由负责会话拆解剧本、撰写首帧 / 尾帧 / 视频提示词（标记过期与手改）；从镜头建单个生成节点
 - [x] RFC 0023 第二步（4b-2）：镜头之间的首尾帧衔接（连续镜头参考上一镜的帧图，可选严格模式抽取上一镜视频的最后一帧）；按分镜批量生成帧图和视频，由服务端执行，重启续跑、不重复提交、额度用完时暂停；用户发起需确认，Agent 发起需审批后才执行
-- [x] RFC 0026 Agent 说明：Codex 和 DeepSeek 共用一份简短的英文说明（346 词，Codex 常驻说明缩小 66%），让 Agent 放手使用自己的能力，并讲清费用和并发修改的规则及原因；分镜、剪辑、代码渲染、本地媒体、生成和画布节点的细则改成按需阅读的专项说明（`guide` 工具、`vis guide [主题]`），分镜或剪辑写错时报错会指向对应说明；Agent 看到的工具说明改为英文；DeepSeek 在隔离沙箱内开放子 Agent、工作流和后台任务；其他 Agent 不再能读取 Claude Code 的凭据；新增可选的真实 Agent 评测（`pnpm --filter @vis/web agent-eval`，只用 Mock 和代码渲染）对比改动前后的表现。Claude 每回合从用户设置接收自己的认证环境，与 Codex 读取自己的 `~/.codex` 使用相同的凭据暴露模型；只转发 `ANTHROPIC_*` 字符串及明确列出的 OAuth / 云服务认证变量，设置覆盖已导出的变量，设置来源仍保持禁用。
+- [x] RFC 0026 Agent 说明：Codex 和 DeepSeek 共用一份简短的英文说明（346 词，Codex 常驻说明缩小 66%），让 Agent 放手使用自己的能力，并讲清费用和并发修改的规则及原因；分镜、剪辑、代码渲染、本地媒体、生成和画布节点的细则改成按需阅读的专项说明（`guide` 工具、`vis guide [主题]`），分镜或剪辑写错时报错会指向对应说明；Agent 看到的工具说明改为英文；DeepSeek 在隔离沙箱内开放子 Agent、工作流和后台任务；其他 Agent 不再能读取 Claude Code 的凭据；新增可选的真实 Agent 评测（`pnpm --filter @vis/web agent-eval`，只用 Mock 和代码渲染）对比改动前后的表现。Claude 每回合从用户设置接收自己的认证环境，与 Codex 读取自己的 `~/.codex` 使用相同的凭据暴露模型；只转发 `ANTHROPIC_*` 字符串及明确列出的 OAuth / 云服务认证变量，设置覆盖已导出的变量，设置来源仍保持禁用。Claude 现已接入 vis MCP、macOS 共享沙箱与审批，保留原生工具；Windows 使用完整工具与审批但无隔离，macOS 仅有钥匙串登录时保留受限工具并显示认证提示。S0 已验证设置环境认证通过、无环境认证失败。审阅修复将完整工具配置隔离到 `<dataDir>/agents/claude`、拒绝真实配置、校验 MCP 名称、移除回退 Bash 与原生提问工具、收紧 Windows Bash/读取审批、仅记录文件路径，错误消息仅清除认证密钥、Agent 令牌与代理凭据，并保留退出码和路径。
 - [x] RFC 0025 性能修复第一版：1000 个节点的画布一秒内打开、平移约 70 FPS（保留 React Flow 测量结果、节点按需选择状态、Markdown 只解析一次、缩小时显示纯文本、历史按槽位订阅）；studiod 空闲时每分钟约 0.2 秒 CPU，原来约 3 秒（每次轮询先做便宜检查、推送出错有隔离和退避、批量生成只在待审批或运行中时轮询；因额度暂停的批次只在点继续时唤醒）。首次尺寸回调返回前也保留测量记录，避免生成更新清掉连线端点缓存、导致来源连线消失。
 - [x] 界面打磨（2026-11-05）：缓存 ffmpeg 版本检查，7 以下版本导出时显示中英文原因；画布工具条避开固定控件；分镜设定勾选、参考图操作、单一负责会话行与素材库/生成服务设置更清晰。RFC 0009 界面、0015、0024 状态区分已实现内容与待补的真机和真实 Agent 验收。
 - [x] RFC 0024 剪辑节点 a 步：剪辑节点带 1 条视频轨和最多 4 条音频轨，可新建空剪辑，也可以把选中的镜头按阅读顺序建成剪辑；Agent 通过整份文档写入（服务端校验）排粗剪：拼接镜头、加配乐并裁剪、淡入淡出；用 ffmpeg 导出为普通视频 / 音频节点（能直接拼接就不重编码，自动检测硬件 H.264 编码器），导出固定提交时的版本并用 exportOf 连回剪辑；画布卡片显示最新导出、迷你时间线和「未导出的修改」标记
@@ -539,7 +540,8 @@ RFC 0010 升级保留历史事件与请求记录：旧游标重取当前快照�
 - [x] RFC 0045 [模型文档链接](docs/rfc/0045-model-doc-links.md)（已实现）：每个内置生成模型都附上厂商官方的提示词指南和 API 参考链接，随模型出现在 `providers.list` 中；Agent 为某个模型写第一条提示词前先打开最新页面，作者的指示和技能仍优先于厂商建议。只放链接：仓库不复制厂商原文，也无需同步
 - [x] RFC 0047 [结果占位节点](docs/rfc/0047-result-placeholders.md)（已实现）：没有指定目标的生成结果在提交时就在画布上建好空节点，显示生成中，位置不再变；产物填入该节点，失败显示在它上面，取消时若仍为空则移除。回执里带节点 ID，Agent 可以立刻为它命名或连线
 - [x] RFC 0048 [Agent 自带能力](docs/rfc/0048-agent-native-capabilities.md)（已实现）：Agent 保留自己的能力，产品只守硬性边界（密钥、费用、网关权限、工作目录之外的写入、不渲染 HTML）。Codex 开启实时网页搜索并在会话里显示，自动审批放行 Agent 自带的只读网页搜索与读取，生成指南要求 Agent 真正读取模型文档，判定页面无法访问前必须写明网址和错误
-- [x] RFC 0049 [Child session model and effort](docs/rfc/0049-child-agent-model.md) (implemented): on author or author-written skill/workflow direction, Agents discover exact model, effort and service-tier ids, configure a new or existing direct child, and read back its settings; self configuration stays UI-only; indexed session labels include effort-only and speed-only settings, resolve catalogs without blocking review, and keep session-button accessible names stable
+- [x] RFC 0049 [Child session model and effort](docs/rfc/0049-child-agent-model.md) (implemented): on author or author-written skill/workflow direction, Agents discover exact model, effort and service-tier ids, configure a new or existing direct child, and read back its settings; self configuration stays UI-only; Claude discovers models and per-model efforts through its SDK, caches successful catalogs by the forwarded-auth hash, rejects failed reads for retry and applies explicit session settings before its environment default; indexed session labels include effort-only and speed-only settings, resolve catalogs without blocking review, and keep session-button accessible names stable
+- [x] RFC 0050 [Clip transforms](docs/rfc/0050-clip-transforms.md): keyframed crop on main-track and overlay clips (a shrinking crop is the push-in), animatable overlay position, width and opacity, source-time keys with linear / ease in-out / hold, one shared preview/export evaluator, and a minimal editor with Inspector diamonds, aspect-locked crop handles, locks retained only by accepted choices or crop geometry edits with known media dimensions and cleared by reset, timeline keys and undo. Agent guides document the same schema; fake Codex and DeepSeek acceptance covers writes, visible keys, preview samples and validation feedback. No motion presets or auto-reframe.
 - [ ] 已知问题：Windows 上的测试稳定性和一些 UI 小问题，清单见 [docs/known-issues.md](docs/known-issues.md)
 - [ ] 负载下的性能：Windows 上机器负载高时，单测和浏览器测试会超时（页面加载超过 5 秒、每个测试文件各自启动 studiod 和 Chrome）；浏览器 e2e 已改为同时跑 4 个文件，准备阶段的超时消失、总时长不变；下一步测量启动、首屏加载和单测并行度，并确认应用本身是否也会变慢
 - [ ] 「释放」：空闲时关闭项目（RFC 0011 推迟）

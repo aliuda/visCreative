@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { clipDurationMs, clipEndMs, isAudioTrack, isMainVideoTrack, isOverlayTrack, sourceTimeAt, TIMELINE_LIMITS, timelineDurationMs, type TimelineClip, type TimelineDoc, type TimelineTrack } from '@vis/protocol'
 import { PeaksWaveform, useFormat, useMessages } from '@vis/ui-kit'
 import type { EditorPartProps } from './types'
@@ -12,6 +12,10 @@ import { useMediaResources } from './model/resources'
 import { effectiveFps } from './model/output'
 import { VolumeControl } from './Inspector'
 import { subscribePlaybackFrames } from './player'
+import { useTransformEditor } from './transform-context'
+import { KeyLane } from './KeyLane'
+import { mergedKeys, visibleTransformKeys } from './model/keys'
+import { Diamond } from './TransformInspector'
 import './timeline-area.css'
 
 type DragMode = 'move' | 'in' | 'out' | 'fadeIn' | 'fadeOut'
@@ -58,7 +62,7 @@ const ClipView = memo(function ClipView({ clip, track, host, color, selected, zo
   } as CSSProperties
   return <div role="button" tabIndex={0} aria-selected={selected} aria-label={m.clipLabel(title, timecode(clip.startMs, fps, f.number), timecode(clipEndMs(clip), fps, f.number))}
     title={`${title} · ${timecode(duration, fps, f.number)}`} data-clip-id={clip.id}
-    className={`vis-tl-clip is-${track.kind}${selected ? ' is-selected' : ''}${boundHit ? ' is-bound' : ''}${unavailable ? ' is-unavailable' : ''}`} style={style}
+    className={`vis-tl-clip is-${track.kind}${selected ? ' is-selected' : ''}${selected && visibleTransformKeys(clip).length ? ' has-transform-keys' : ''}${boundHit ? ' is-bound' : ''}${unavailable ? ' is-unavailable' : ''}`} style={style}
     onPointerDown={event => { if (event.button !== 0) return; event.stopPropagation(); selectClip(event); startDrag(event, 'move') }}
     onContextMenu={context} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); selectClip(event) } }}
     onFocus={event => { if (event.target === event.currentTarget && !selected) event.currentTarget.setAttribute('data-focused', 'true') }}>
@@ -74,6 +78,7 @@ const ClipView = memo(function ClipView({ clip, track, host, color, selected, zo
       </span>
     })}
     {width >= 48 && <span className="vis-tl-clip-label">{image ? <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="2" width="12" height="12" rx="2" /><path d="m2 11 4-4 3 3 2-2 3 3" /></svg> : null}{unavailable ? m.unavailable : title}{!isAudioTrack(track) && source?.kind === 'video' && <span className="vis-tl-clip-audio" title={m.clipAudio}><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d={clip.volume === 0 ? 'M2 6h3l3-3v10l-3-3H2zM11 6l3 4m0-4-3 4' : 'M2 6h3l3-3v10l-3-3H2zM11 5c3 2 3 4 0 6'} /></svg>{clip.volume !== 1 && m.percent(f.number(Math.round(clip.volume * 100)))}</span>}</span>}
+    {!selected && mergedKeys(clip).length > 0 && <span className="vis-tl-motion-glyph" role="img" aria-label={m.hasMotion} title={m.hasMotion}><Diamond state="animated" /></span>}
     <span className="vis-tl-badges">{(clip.speed ?? 1) !== 1 && <span className="vis-tl-speed-badge">{m.speedValue(f.number(clip.speed!))}</span>}{newer && <span title={m.newVersion} aria-label={m.newVersion} className="vis-tl-new-version">!</span>}{!source && <span title={m.sourceDeleted} aria-label={m.sourceDeleted}><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m6 4 1-1c4-4 8 0 4 4l-1 1m-4 4-1 1c-4 4-8 0-4-4l1-1M5 6l5 4M2 2l12 12" /></svg></span>}</span>
     {(['in', 'out'] as const).map(edge => <span key={edge} className={`vis-tl-trim is-${edge}`} title={edge === 'in' ? m.in : m.out} onPointerDown={event => { event.stopPropagation(); startDrag(event, edge) }} />)}
   </div>
@@ -85,6 +90,7 @@ const ClipView = memo(function ClipView({ clip, track, host, color, selected, zo
 
 export function TimelineArea({ host, draft, clock, selection, select }: EditorPartProps) {
   const m = useMessages(timelineEditorMessages)
+  const transformEditor = useTransformEditor()
   const f = useFormat()
   const scroller = useRef<HTMLDivElement>(null)
   const sheet = useRef<HTMLDivElement>(null)
@@ -103,7 +109,9 @@ export function TimelineArea({ host, draft, clock, selection, select }: EditorPa
   const cutButton = useRef<HTMLButtonElement | null>(null)
   const closeCut = () => { setCut(null); cutButton.current?.focus() }
   const [showDiff, setShowDiff] = useState(false)
-  const [notice, setNotice] = useState('')
+  const [noticeState, setNoticeState] = useState<{ text: string; owner?: string }>({ text: '' })
+  const notice = noticeState.text
+  const setNotice = useCallback((text: string) => setNoticeState({ text }), [])
   const [flashed, setFlashed] = useState<string | null>(null)
   const [dropState, setDropState] = useState<{ id: string; invalid: boolean } | null>(null)
   const [overlayDragging, setOverlayDragging] = useState(false)
@@ -382,6 +390,8 @@ export function TimelineArea({ host, draft, clock, selection, select }: EditorPa
       if (event.key === 'Escape' && trackMenu) { event.preventDefault(); event.stopImmediatePropagation(); setTrackMenu(false); trackMenuButton.current?.focus(); return }
       if (trackMenu) return
       const target = event.target as HTMLElement | null
+      if (event.key === 'Escape' && transformEditor.cropId) return
+      if (target?.closest('.vis-tl-key-lane, .vis-tl-crop-editor') && !event.metaKey && !event.ctrlKey) return
       if (target?.closest('input:not([type="range"]):not([type="checkbox"]):not([type="button"]), textarea, select, [contenteditable="true"]')) return
       const modifier = event.ctrlKey || event.metaKey
       const key = event.key.toLowerCase()
@@ -546,6 +556,7 @@ export function TimelineArea({ host, draft, clock, selection, select }: EditorPa
                   event.preventDefault(); if (draft.conflict) return
                   select([clip.id]); setMenu({ id: clip.id, x: Math.min(event.clientX, window.innerWidth - 220), y: Math.min(event.clientY, window.innerHeight - 260), at: clamp(pointerTime(event.clientX), clip.startMs + 1, clipEndMs(clip) - 1) })
                 }} />)}
+              {track.clips.filter(clip => selection.includes(clip.id) && clipEndMs(clip) >= windowMs.fromMs && clip.startMs <= windowMs.toMs).map(clip => <KeyLane key={`keys:${clip.id}`} clip={clip} clock={clock} draft={draft} zoom={zoom} fps={fps} onRefused={reason => setNoticeState(previous => reason ? { text: m[reason], owner: clip.id } : previous.owner === clip.id ? { text: '' } : previous)} />)}
               {isMainVideoTrack(track) && track.clips.slice(1).map((clip, index) => {
                 const overlap = clip.transitionIn?.durationMs ?? 0
                 const center = clip.startMs + overlap / 2

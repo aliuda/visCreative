@@ -1,3 +1,4 @@
+import type { PlacementGestures } from './overlay/gesture'
 import type { AssetKind, FontRef, FontView, MediaPreview, MediaTaskView, NodeView, TimelineDoc } from '@vis/protocol'
 
 /**
@@ -83,6 +84,7 @@ export type EditorPartProps = {
   host: TimelineEditorHost
   draft: TimelineDraft
   clock: PlaybackClock
+  placementGestures?: PlacementGestures
   selection: readonly string[]
   select(clipIds: readonly string[]): void
 }

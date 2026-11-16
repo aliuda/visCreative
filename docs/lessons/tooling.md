@@ -1,5 +1,12 @@
 # Tooling lessons
 
+## A new worktree does not contain ignored caption fonts
+
+- **Symptom:** the browser suite passes while an entire caption file is skipped, and the unit skip count rises by seven compared with main.
+- **Cause:** dependency installation and build do not fetch the ignored built-in font files. Missing fonts skip seven timeline-text browser cases, four font metadata checks and three real ASS caption checks.
+- **Instead:** run `pnpm fonts:fetch` before the acceptance gates; it verifies the pinned binaries and licenses. Compare skip counts with the reference run and inspect the concrete skip guards before reporting completion.
+- **Found in:** [RFC 0050 step d review](../rfc/0050-clip-transforms.md#step-d-review-corrections-2026-11-15), [font setup](../../resources/fonts/README.md).
+
 ## Asar file lists use the build host's separators
 
 - **Symptom:** a post-pack guard finds runtime node_modules inside a macOS shell asar but would silently accept the same contents on Windows.

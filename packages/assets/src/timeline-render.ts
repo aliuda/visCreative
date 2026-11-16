@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { VisError } from '@vis/domain'
-import { TimelineDoc, TIMELINE_LIMITS, FALLBACK_OUTPUT, clipDurationMs, effectiveFades, imageMaxMs, isOverlayTrack, overlayRect, overlayTracks, sourceTimeAt, timelineDurationMs, visibleTextTracks } from '@vis/protocol'
+import { TimelineDoc, TIMELINE_LIMITS, FALLBACK_OUTPUT, FULL_CROP, clipDurationMs, clipTransformAt, effectiveFades, evaluateAnimated, imageMaxMs, isAnimated, isOverlayTrack, overlayTracks, sourceTimeAt, timelineDurationMs, visibleTextTracks, type Animated, type CropRect } from '@vis/protocol'
 import { abortError, runMedia, tool } from './media'
 import { planCaptions, type CaptionFonts } from './timeline-captions'
 import type { VideoEncoder } from './video-encoder'
@@ -121,7 +121,7 @@ function copyEligible(doc: TimelineDoc, sources: Sources) {
     const source = sourceFor(sources, clip)
     if (source.kind !== 'video' || source.video?.codec !== 'h264' || source.audio?.codec !== 'aac' || source.video.rotation) return false
     if (!source.video.pixelFormat || !source.video.timeBase || !source.audio.sampleRate || source.audio.channels !== 2 || !source.audio.timeBase || /[\r\n]/.test(source.path)) return false
-    if (clip.inMs !== 0 || Math.abs(clip.outMs - (source.probedDurationMs ?? duration(source)!)) > DURATION_SLACK_MS || clip.volume !== 1 || clip.fadeInMs || clip.fadeOutMs || (clip.speed ?? 1) !== 1 || clip.transitionIn) return false
+    if (clip.inMs !== 0 || Math.abs(clip.outMs - (source.probedDurationMs ?? duration(source)!)) > DURATION_SLACK_MS || clip.volume !== 1 || clip.fadeInMs || clip.fadeOutMs || (clip.speed ?? 1) !== 1 || clip.transitionIn || clip.crop) return false
     if (signature(source) !== signature(first)) return false
     if (doc.output && (doc.output.width !== source.video.width || doc.output.height !== source.video.height || doc.output.fps !== fpsValue(source.video.frameRate))) return false
   }
@@ -151,6 +151,90 @@ function checkCommandBudget(args: string[], executable = 'ffmpeg') {
 function concatPath(path: string) {
   // The concat demuxer uses its own quoting rules, independent of the host shell.
   return `'${resolve(path).replace(/\\/g, '/').replace(/'/g, "'\\''")}'`
+}
+
+const animatedOverlay = (clip: Clip) => isAnimated(clip.crop) || Object.values(clip.overlay ?? {}).some(value => isAnimated(value))
+
+/** The same source-time segments as evaluateAnimated, expressed on this filter's output clock. */
+function transformExpression<T>(value: Animated<T>, clip: Clip, clock: string, select: (value: T) => number): string {
+  if (!isAnimated(value)) return String(select(value))
+  if (value.keys.every(key => select(key.value) === select(value.keys[0]!.value))) return String(select(value.keys[0]!.value))
+  let expression = String(select(value.keys.at(-1)!.value))
+  for (let index = value.keys.length - 2; index >= 0; index--) {
+    const from = value.keys[index]!
+    const to = value.keys[index + 1]!
+    const start = (from.t - clip.inMs) / (clip.speed ?? 1) / 1000
+    const end = (to.t - clip.inMs) / (clip.speed ?? 1) / 1000
+    const a = select(from.value)
+    const b = select(to.value)
+    const p = `clip((${clock}-(${start}))/(${end - start}),0,1)`
+    const progress = from.ease === 'easeInOut' ? `(${p}*${p}*(3-2*${p}))` : p
+    const segment = from.ease === 'hold' || a === b ? String(a) : `(${a}+(${b - a})*${progress})`
+    // Frame clocks and source-time divisions can differ by one floating-point ULP at a key.
+    expression = `if(lt(${clock}+1e-9,${end}),${segment},${expression})`
+  }
+  return expression
+}
+
+const scalarExpression = (value: Animated<number>, clip: Clip, clock: string) => transformExpression(value, clip, clock, n => n)
+type CropExpressions = Record<keyof CropRect, string>
+function cropExpressions(clip: Clip, clock: string): CropExpressions {
+  const crop = clip.crop ?? FULL_CROP
+  return { x: transformExpression(crop, clip, clock, rect => rect.x), y: transformExpression(crop, clip, clock, rect => rect.y),
+    width: transformExpression(crop, clip, clock, rect => rect.width), height: transformExpression(crop, clip, clock, rect => rect.height) }
+}
+
+function staticCrop(clip: Clip, visual: NonNullable<Source['video']>) {
+  if (!clip.crop || isAnimated(clip.crop)) return []
+  const crop = clip.crop
+  const x = Math.max(0, Math.min(visual.width - 1, Math.round(crop.x * visual.width)))
+  const y = Math.max(0, Math.min(visual.height - 1, Math.round(crop.y * visual.height)))
+  const right = Math.max(x + 1, Math.min(visual.width, Math.round((crop.x + crop.width) * visual.width)))
+  const bottom = Math.max(y + 1, Math.min(visual.height, Math.round((crop.y + crop.height) * visual.height)))
+  return [`crop=${right - x}:${bottom - y}:${x}:${y}:exact=1`]
+}
+
+/** Each slice owns its expression registers. Cache time-only curves once per frame, not per pixel. */
+function cachedExpression(assignments: string[], sample: string) {
+  return `if(eq(ld(0),N+1),0,st(0,N+1);${assignments.join(';')});${sample}`
+}
+
+function cropSampler(clip: Clip, visual: NonNullable<Source['video']>, expressions: CropExpressions, output?: { width: number; height: number }, opacity?: string) {
+  const assignments = [
+    `st(1,${expressions.width})`, `st(2,${expressions.height})`, `st(3,${expressions.x})`, `st(4,${expressions.y})`,
+  ]
+  const crops = isAnimated(clip.crop) ? clip.crop.keys.map(key => key.value) : [clip.crop ?? FULL_CROP]
+  const sourceAspect = visual.width / visual.height
+  const bars = output && crops.some(crop => Math.abs(sourceAspect * crop.width / crop.height - output.width / output.height) > 1e-9)
+  if (bars) {
+    // A fixed-size source canvas represents normalized output coordinates, including letterboxing.
+    const ratio = sourceAspect / (output.width / output.height)
+    assignments.push(`st(5,min(1,${ratio}*ld(1)/ld(2)))`, `st(6,min(1,ld(2)/(${ratio}*ld(1))))`,
+      'st(7,W*(1-ld(5))/2)', 'st(8,H*(1-ld(6))/2)',
+      'st(3,W*ld(3)+(0.5-ld(7))*ld(1)/ld(5)-0.5)', 'st(4,H*ld(4)+(0.5-ld(8))*ld(2)/ld(6)-0.5)',
+      'st(1,ld(1)/ld(5))', 'st(2,ld(2)/ld(6))',
+      'st(5,W-ld(7)-0.5)', 'st(6,H-ld(8)-0.5)', 'st(7,ld(7)-0.5)', 'st(8,ld(8)-0.5)')
+  } else {
+    assignments.push('st(3,W*ld(3)+(ld(1)-1)/2)', 'st(4,H*ld(4)+(ld(2)-1)/2)')
+  }
+  if (opacity) assignments.push(`st(9,${opacity})`)
+  const coordinates = 'X*ld(1)+ld(3),Y*ld(2)+ld(4)'
+  const planes = (['lum', 'cb', 'cr', ...(visual.hasAlpha || opacity ? ['alpha'] : [])] as const).map(plane => {
+    let sample = `${plane}(${coordinates})${plane === 'alpha' && opacity ? '*ld(9)' : ''}`
+    if (bars) sample = `if(between(X,ld(7),ld(5))*between(Y,ld(8),ld(6)),${sample},${plane === 'lum' ? 16 : plane === 'alpha' ? 255 : 128})`
+    return `${plane === 'alpha' ? 'a' : plane}='${cachedExpression(assignments, sample)}'`
+  })
+  return `geq=${planes.join(':')}:interpolation=bilinear`
+}
+
+function mainPictureFilters(clip: Clip, visual: NonNullable<Source['video']>, width: number, height: number, fps: number) {
+  if (isAnimated(clip.crop)) {
+    // The sampler's black/neutral/opaque constants use the export's eight-bit limited range.
+    const format = visual.hasAlpha ? 'yuva444p' : /^yuvj?420p/.test(visual.pixelFormat) ? 'yuv420p' : 'yuv444p'
+    return `scale=iw:ih:in_range=auto:out_range=tv,format=${format},${cropSampler(clip, visual, cropExpressions(clip, `(N/${fps})`), { width, height })},scale=${width}:${height}`
+  }
+  return [...staticCrop(clip, visual), `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
+    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`].join(',')
 }
 
 /** Compile a validated edit document without filesystem access or process execution. */
@@ -211,7 +295,9 @@ export function planTimelineRender(input: TimelineDoc, sources: Sources, opts: {
     if (track.kind === 'video') {
       const label = `v${videos.length}`
       const opening = source.kind === 'image' ? `loop=loop=-1:size=1:start=0,setpts=N/(30*TB),trim=duration=${seconds(length)}` : `trim=start=${seconds(start)}:end=${seconds(end)},setpts=${speed === 1 ? 'PTS-STARTPTS' : `(PTS-STARTPTS)/${speed}`}`
-      graph.push(`${use(source, 'video')}${opening},scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=${fps},setsar=1,${source.video?.hasAlpha ? 'format=yuva420p,premultiply=inplace=1,' : ''}format=yuv420p,tpad=stop_mode=clone:stop_duration=${seconds(DURATION_SLACK_MS / Math.min(1, speed))},trim=duration=${seconds(length)},settb=AVTB[${label}]`)
+      const animated = isAnimated(clip.crop)
+      const clock = animated ? `,fps=${fps},tpad=stop_mode=clone:stop_duration=${seconds(DURATION_SLACK_MS / Math.min(1, speed))},trim=duration=${seconds(length)},settb=AVTB,setpts=N/(${fps}*TB)` : ''
+      graph.push(`${use(source, 'video')}${opening}${clock},${mainPictureFilters(clip, source.video!, width!, height!, fps!)}${animated ? '' : `,fps=${fps}`},setsar=1,${source.video?.hasAlpha ? 'format=yuva420p,premultiply=inplace=1,' : ''}format=yuv420p,tpad=stop_mode=clone:stop_duration=${seconds(DURATION_SLACK_MS / Math.min(1, speed))},trim=duration=${seconds(length)},settb=AVTB[${label}]`)
       videos.push(`[${label}]`)
     }
     if ((!isOverlayTrack(track) || source.kind === 'video') && !track.muted && track.volume && clip.volume && source.audio) {
@@ -249,15 +335,14 @@ export function planTimelineRender(input: TimelineDoc, sources: Sources, opts: {
     : blackBase ? `color=c=black:s=${width}x${height}:r=${fps},trim=duration=${seconds(durationMs)},format=yuv420p,setsar=1` : undefined
   let composite = picture
   if (picture && overlays.length) {
-    graph.push(`${picture}[base]`)
+    const animatedComposition = overlays.some(track => track.clips.some(animatedOverlay))
+    graph.push(`${picture}${animatedComposition ? ',format=yuv444p' : ''}[base]`)
     let base = '[base]'
     let index = 0
     for (const track of overlays) for (const clip of track.clips) {
       const source = sourceFor(sources, clip)
       const visual = source.video!
-      // The probe already applies display rotation to these dimensions.
-      const aspect = visual.width / visual.height
-      const rect = overlayRect(clip.overlay!, aspect, { width: width!, height: height! })
+      const animated = animatedOverlay(clip)
       const length = clipDurationMs(clip)
       const firstFrame = Math.ceil(clip.startMs * fps! / 1000)
       const speed = clip.speed ?? 1
@@ -268,11 +353,39 @@ export function planTimelineRender(input: TimelineDoc, sources: Sources, opts: {
           `setpts=${speed === 1 ? 'PTS-STARTPTS' : `(PTS-STARTPTS)/${speed}`}`, `fps=${fps}`, 'settb=AVTB',
           `tpad=stop_mode=clone:stop_duration=${seconds(DURATION_SLACK_MS / Math.min(1, speed))}`, `trim=duration=${seconds(length)}`,
         ]
+      let transform: string[]
+      let placement: string
+      if (animated) {
+        const frameClock = `((${firstFrame}+N)/${fps}-${seconds(clip.startMs)})`
+        const crop = cropExpressions(clip, frameClock)
+        const opacity = scalarExpression(clip.overlay!.opacity, clip, frameClock)
+        const values = isAnimated(clip.crop) ? clip.crop.keys.map(key => key.value) : [clip.crop ?? FULL_CROP]
+        const ratio = values[0]!.width / values[0]!.height
+        // Each filter has its own counter; constant crop aspects need no repeated curves in scale.
+        const scaleClock = (expression: string) => expression.replace(/\bN\b/g, 'n')
+        const aspect = values.every(value => Math.abs(value.width / value.height / ratio - 1) < 1e-12)
+          ? String(visual.width / visual.height * ratio)
+          : `(${visual.width / visual.height}*(${scaleClock(crop.width)})/(${scaleClock(crop.height)}))`
+        const scaling = `scale=w='max(2,2*round(${width}*(${scaleClock(scalarExpression(clip.overlay!.width, clip, frameClock))})/2))':h='max(2,2*round(ow/${aspect}/2))':eval=frame`
+        transform = [
+          ...staticCrop(clip, visual), 'format=yuva444p',
+          ...(isAnimated(clip.crop) ? [cropSampler(clip, visual, crop, undefined, opacity)] : isAnimated(clip.overlay!.opacity)
+            ? [`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='${cachedExpression([`st(9,${opacity})`], 'alpha(X,Y)*ld(9)')}'`]
+            : [`colorchannelmixer=aa=${evaluateAnimated(clip.overlay!.opacity, clip.inMs)}`]), scaling,
+        ]
+        const clock = `(round(t*${fps})/${fps}-${seconds(clip.startMs)})`
+        placement = `x='round(${width}*(${scalarExpression(clip.overlay!.x, clip, clock)})-overlay_w/2)':y='round(${height}*(${scalarExpression(clip.overlay!.y, clip, clock)})-overlay_h/2)':eval=frame:format=yuv444`
+      } else {
+        // The probe already applies display rotation to these dimensions.
+        const rect = clipTransformAt(clip, clip.inMs, { width: width!, height: height! }, visual).rect
+        transform = [...staticCrop(clip, visual), `scale=${rect.width}:${rect.height}`, 'format=yuva420p', `colorchannelmixer=aa=${evaluateAnimated(clip.overlay!.opacity, clip.inMs)}`]
+        placement = `x=${rect.x}:y=${rect.y}`
+      }
       const filters = [
         ...opening,
         // Evaluate fades on the output frame clock, including starts between output frames.
         `setpts=round((N+${firstFrame})/(${fps}*TB))-${seconds(clip.startMs)}/TB`,
-        `scale=${rect.width}:${rect.height}`, 'format=yuva420p', `colorchannelmixer=aa=${clip.overlay!.opacity}`,
+        ...transform,
         // Framesync passes the base through just after the last overlay PTS, before trim's EOF time.
         // Hold one extra frame and let the half-open timeline interval control visibility.
         'tpad=stop_mode=clone:stop=1',
@@ -281,7 +394,7 @@ export function planTimelineRender(input: TimelineDoc, sources: Sources, opts: {
         `setpts=PTS+${seconds(clip.startMs)}/TB`,
       ]
       graph.push(`${use(source, 'video')}${filters.join(',')}[ov${index}]`)
-      graph.push(`${base}[ov${index}]overlay=x=${rect.x}:y=${rect.y}:eof_action=pass:enable='between(t,${seconds(clip.startMs)},${seconds(clip.startMs + length)})*lt(t,${seconds(clip.startMs + length)})'[over${index}]`)
+      graph.push(`${base}[ov${index}]overlay=${placement}:eof_action=pass:enable='between(t,${seconds(clip.startMs)},${seconds(clip.startMs + length)})*lt(t,${seconds(clip.startMs + length)})'[over${index}]`)
       base = `[over${index++}]`
     }
     composite = `${base}format=yuv420p`

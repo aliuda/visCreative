@@ -73,7 +73,7 @@ describe('Agent registration', () => {
       { resume: true, interrupt: true, models: true, effort: true, approvals: true },
       { resume: true, interrupt: true, models: true, effort: true, approvals: true },
     ])
-    expect(claudeDescriptor.capabilities).toEqual({ resume: true, interrupt: true, models: false, effort: false, approvals: false })
+    expect(claudeDescriptor.capabilities).toEqual({ resume: true, interrupt: true, models: true, effort: true, approvals: true })
     expect(codexDescriptor.forbiddenPaths).toContain('~/.codex')
     expect(deepseekDescriptor.forbiddenPaths).toContain('~/.dsh')
     expect(claudeDescriptor.forbiddenPaths).toEqual(['~/.claude', '~/.claude.json', '~/.claude.json.*'])

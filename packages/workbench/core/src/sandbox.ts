@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -12,12 +12,10 @@ function canonical(path: string): string {
   return parent === absolute ? absolute : join(canonical(parent), basename(absolute))
 }
 
-function agentPrivatePaths(home: string, agent: SandboxAgent) {
+function homePaths(home: string, entries: readonly string[]) {
   const paths: string[] = []
   const patterns: { directory: string; regex: string }[] = []
-  const own = `~/${agent.runtimeDirectory}`
-  for (const path of new Set(agent.forbiddenPaths ?? [])) {
-    if (path === own || path.startsWith(own + '/')) continue
+  for (const path of new Set(entries)) {
     const expanded = path.startsWith('~/') ? join(home, path.slice(2)) : resolve(path)
     const name = basename(expanded)
     if (!name.includes('*')) { paths.push(expanded); continue }
@@ -31,10 +29,34 @@ function agentPrivatePaths(home: string, agent: SandboxAgent) {
   return { paths, patterns }
 }
 
+function agentPrivatePaths(home: string, agent: SandboxAgent) {
+  const own = `~/${agent.runtimeDirectory}`
+  return homePaths(home, (agent.forbiddenPaths ?? []).filter(path => path !== own && !path.startsWith(own + '/') && !agent.runtimePaths?.some(entry => path === `~/${entry}`)))
+}
+
+function agentRuntimePaths(home: string, agent: SandboxAgent) {
+  return homePaths(home, (agent.runtimePaths ?? []).map(path => `~/${path}`))
+}
+
+function runtimePattern(pattern: { directory: string; regex: string }): string {
+  // Seatbelt treats escaped operators differently from JS; character classes preserve literal directory names.
+  const directory = [...canonical(pattern.directory)].map(char => {
+    if (char === '[' || char === ']') return `[${char}]`
+    if (char === '^') return '[\\^]'
+    if (char === '\\') return '[\\\\]'
+    return /[.*+?${}()|]/.test(char) ? `[${char}]` : char
+  }).join('')
+  return `^${directory}${pattern.regex}`
+}
+
 export type SandboxAgent = {
   envPassthrough: readonly string[]
   runtimeDirectory: string
   runtimeHomeVariable?: string
+  /** Opt in to the application-owned Claude runtime, never to an arbitrary data-directory path. */
+  dataRuntimeDirectory?: 'agents/claude'
+  /** Additional home-relative runtime files, including backup-name patterns. */
+  runtimePaths?: readonly string[]
   forbiddenPaths?: readonly string[]
 }
 
@@ -43,6 +65,7 @@ const DEFAULT_SANDBOX_AGENT: SandboxAgent = { envPassthrough: [], runtimeDirecto
 export function buildSandboxPolicy(cwd: string, dataDir: string, home: string, runtimeHome: string, agent: SandboxAgent = DEFAULT_SANDBOX_AGENT): string {
   const quote = (path: string) => JSON.stringify(canonical(path))
   const protectedAgent = agentPrivatePaths(home, agent)
+  const runtime = agentRuntimePaths(home, agent)
   const privatePaths = [join(dataDir, 'run'), join(dataDir, 'providers.json'), join(home, '.vis-dev/run'), join(home, '.ssh'), ...protectedAgent.paths, join(home, 'Library/Keychains'), '/Library/Keychains']
   return [
     '(version 1)',
@@ -51,7 +74,7 @@ export function buildSandboxPolicy(cwd: string, dataDir: string, home: string, r
     // A fixed regex avoids Seatbelt's distinct escaping rules; same-named backups deeper under home are also private.
     `(deny file-read* ${privatePaths.map(path => `(subpath ${quote(path)})`).join(' ')} (require-all (subpath ${quote(dataDir)}) (regex #"/app[.]db[^/]*$")) (require-all (subpath ${quote(join(dataDir, 'spaces'))}) (regex #"/space[.]db[^/]*$"))${protectedAgent.patterns.map(pattern => ` (require-all (subpath ${quote(pattern.directory)}) (regex #${JSON.stringify(pattern.regex)}))`).join('')})`,
     '(deny file-write*)',
-    `(allow file-write* (subpath ${quote(cwd)}) (subpath ${quote(runtimeHome)}) (literal "/dev/null") (literal "/dev/tty") (subpath "/dev/fd"))`,
+    `(allow file-write* (subpath ${quote(cwd)}) (subpath ${quote(runtimeHome)})${runtime.paths.map(path => ` (literal ${quote(path)})`).join('')}${runtime.patterns.map(pattern => ` (require-all (subpath ${quote(pattern.directory)}) (regex #${JSON.stringify(runtimePattern(pattern))}))`).join('')} (literal "/dev/null") (literal "/dev/tty") (subpath "/dev/fd"))`,
   ].join('\n')
 }
 
@@ -75,13 +98,34 @@ export function prepareSandbox(options: {
   if (agent.runtimeHomeVariable) env[agent.runtimeHomeVariable] = runtimeHome
   const available = options.available ?? existsSync
   const fallback = (notice: string) => ({ env, policy: undefined, notice, isolation: 'none' as const })
-  if (platform === 'win32') return { env, policy: undefined, notice: undefined, isolation: 'none' as const }
+  let dataRuntime = false
+  if (agent.dataRuntimeDirectory) {
+    if (!options.dataDir || agent.dataRuntimeDirectory !== 'agents/claude') return fallback('Agent runtime directory is unavailable; keeping restricted tools')
+    const dataDir = canonical(options.dataDir)
+    const expected = join(dataDir, agent.dataRuntimeDirectory)
+    let safe = runtimeHome === expected
+    for (const directory of [join(dataDir, 'agents'), expected]) {
+      try {
+        const info = lstatSync(directory)
+        if (info.isSymbolicLink() || !info.isDirectory()) safe = false
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') safe = false
+      }
+    }
+    if (!safe) return fallback('Agent runtime directory is unsafe; keeping restricted tools')
+    dataRuntime = true
+  }
+  if (platform === 'win32') {
+    if (dataRuntime) { mkdirSync(runtimeHome, { recursive: true, mode: 0o700 }); chmodSync(runtimeHome, 0o700) }
+    return { env, policy: undefined, notice: undefined, isolation: 'none' as const }
+  }
   if (!options.dataDir) return fallback('未配置密钥隔离目录，保持只读模式')
   if ((options.platform ?? process.platform) !== 'darwin' || !available('/usr/bin/sandbox-exec')) return fallback('系统不支持密钥隔离沙箱，保持只读模式')
   if (!available('/etc/ssl/cert.pem')) return fallback('缺少 /etc/ssl/cert.pem 根证书，保持只读模式')
   const cwd = canonical(options.cwd)
   const dataDir = canonical(options.dataDir)
   const protectedAgent = agentPrivatePaths(home, agent)
+  const runtime = agentRuntimePaths(home, agent)
   const restricted = [join(dataDir, 'run'), join(home, '.vis-dev/run'), join(home, '.ssh'), ...protectedAgent.paths, join(home, 'Library/Keychains'), '/Library/Keychains']
   const overlapsBackup = (path: string) => protectedAgent.patterns.some(pattern => path.startsWith(pattern.directory + sep) && new RegExp(pattern.regex.slice(0, -1) + '(?:/|$)').test(path.split(sep).join('/')))
   const overlaps = (left: string, right: string) => left === right || left.startsWith(`${right}${sep}`) || right.startsWith(`${left}${sep}`)
@@ -90,11 +134,12 @@ export function prepareSandbox(options: {
   const isWithinData = withinData === '' || (!withinData.startsWith(`..${sep}`) && withinData !== '..' && !isAbsolute(withinData))
   // Preserve workspaces of old sessions and migrated projects; application databases and runtime directories cannot be writable workspaces.
   const isLegacyWorkspace = parts[0] === 'spaces' && Boolean(parts[1]) && ((parts[2] === 'sessions' && Boolean(parts[3])) || (parts[2] === 'project' && parts[3] === 'workspaces' && Boolean(parts[4])))
-  if ((isWithinData && !isLegacyWorkspace) || overlapsBackup(cwd) || overlapsBackup(runtimeHome) || restricted.some(path => overlaps(cwd, canonical(path)) || overlaps(runtimeHome, canonical(path))) || dataDir === cwd || dataDir.startsWith(`${cwd}/`) || overlaps(dataDir, runtimeHome)) {
+  if ((isWithinData && !isLegacyWorkspace) || [cwd, runtimeHome, ...runtime.paths].some(path => overlapsBackup(canonical(path))) || restricted.some(path => [cwd, runtimeHome, ...runtime.paths].some(runtimePath => overlaps(canonical(runtimePath), canonical(path)))) || dataDir === cwd || dataDir.startsWith(`${cwd}/`) || (!dataRuntime && overlaps(dataDir, runtimeHome)) || runtime.paths.some(path => overlaps(dataDir, canonical(path)))) {
     return fallback('工作目录或 Agent 配置目录与密钥目录重叠，保持只读模式')
   }
   mkdirSync(join(cwd, '.vis-tmp'), { recursive: true, mode: 0o700 })
   mkdirSync(runtimeHome, { recursive: true, mode: 0o700 })
+  if (dataRuntime) chmodSync(runtimeHome, 0o700)
   env.TMPDIR = canonical(join(cwd, '.vis-tmp'))
   // zsh writes here-documents under TMPPREFIX (default /tmp/zsh), not TMPDIR, and /tmp is not writable here.
   env.TMPPREFIX = join(env.TMPDIR, 'zsh')

@@ -3,7 +3,7 @@ import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'n
 import { cpus, tmpdir, totalmem } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { FALLBACK_OUTPUT, overlayOpacityAt, timelineDurationMs, type TimelineClip, type TimelineDoc, type TimelineTrack } from '@vis/protocol'
+import { FALLBACK_OUTPUT, clipTransformAt, overlayOpacityAt, sourceTimeAt, timelineDurationMs, type TimelineClip, type TimelineDoc, type TimelineTrack, type TransformEase } from '@vis/protocol'
 import { mimeOf } from './media'
 import { planTimelineRender, probeTimelineSource, renderTimeline, type ProbedStreams, type RenderedTimeline, type TimelineSource } from './timeline-render'
 import type { VideoEncoder } from './video-encoder'
@@ -30,6 +30,8 @@ const plan = (d: TimelineDoc, sources = new Map([['one', source()]]), e = encode
 const encodeDoc = () => doc(track([clip('one', { volume: 0.8 })]))
 const overlayClip = (overrides: Partial<TimelineClip> = {}) => clip('image', { overlay: { x: 0.5, y: 0.5, width: 0.5, opacity: 1 }, ...overrides })
 const overlayTrack = (clips = [overlayClip()], overrides: Partial<TimelineTrack> = {}) => track(clips, { id: 'overlay', kind: 'overlay', ...overrides })
+const key = <T>(t: number, value: T, ease: TransformEase = 'linear') => ({ t, value, ease })
+const cropKeys = (ease: TransformEase = 'linear') => ({ keys: [key(0, { x: 0, y: 0, width: 1, height: 1 }, ease), key(2000, { x: 0.1, y: 0.1, width: 0.8, height: 0.8 })] })
 function snapshot(d: TimelineDoc, sources?: Map<string, Source>) {
   const result = plan(d, sources)
   return { ...result, cwd: '<sources>' }
@@ -378,6 +380,84 @@ describe('Timeline source validation', () => {
   })
 })
 
+describe('0050 transform render graphs', () => {
+  it('keeps the untransformed filter graph byte-identical', () => {
+    expect(plan(encodeDoc()).files[0]!.content).toBe([
+      '[0:v:0]null[i0v0]', '[0:a:0]anull[i0a0]',
+      '[i0v0]trim=start=0.000:end=2.000,setpts=PTS-STARTPTS,scale=320:240:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=320:240:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop_duration=0.050,trim=duration=2.000,settb=AVTB[v0]',
+      '[i0a0]atrim=start=0.000:end=2.000,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.8,adelay=0:all=1[a0]',
+      '[v0]concat=n=1:v=1:a=0,tpad=stop_mode=clone:stop_duration=2.000,trim=duration=2.000[video]',
+      'anullsrc=r=48000:cl=stereo,atrim=duration=2.000[silence]',
+      '[silence][a0]amix=inputs=2:normalize=0,alimiter=level=0:latency=1,apad,atrim=duration=2.000[audio]',
+    ].join(';\n') + '\n')
+  })
+  it('uses plain crop and the existing scaler for static main and overlay crops, disabling stream copy', () => {
+    const crop = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }
+    const main = plan(doc(track([clip('one', { crop })])))
+    expect(main.mode).toBe('encode')
+    expect(main.files[0]!.content).toContain('crop=160:120:80:60:exact=1,scale=320:240:force_original_aspect_ratio=decrease')
+    expect(main.files[0]!.content).not.toContain('geq=')
+    const overlay = plan({ ...doc(overlayTrack([clip('one', { crop, overlay: { x: 0.5, y: 0.5, width: 0.5, opacity: 1 } })])), output: { width: 320, height: 240, fps: 30 } })
+    expect(overlay.files[0]!.content).toContain('crop=160:120:80:60:exact=1,scale=160:120,format=yuva420p,colorchannelmixer=aa=1')
+    expect(overlay.files[0]!.content).not.toContain('geq=')
+  })
+  it('rounds static crop edges within a 1001-pixel source', () => {
+    const sources = new Map([['one', source('odd', { kind: 'image', video: { ...streams.video!, width: 1001, height: 1001 } })]])
+    const graph = plan(doc(track([clip('one', { crop: { x: 0.5, y: 0.5, width: 0.5, height: 0.5 } })])), sources).files[0]!.content
+    expect(graph).toContain('crop=500:500:501:501:exact=1')
+    const partial = plan(doc(track([clip('one', { crop: { x: 0.2, y: 0.2, width: 0.3, height: 0.3 } })])), sources).files[0]!.content
+    expect(partial).toContain('crop=301:301:200:200:exact=1')
+  })
+  it.each(['linear', 'easeInOut', 'hold'] as const)('samples %s crop on the output clock with source-time trims and speed', ease => {
+    const result = plan(doc(track([clip('one', { inMs: 250, outMs: 1750, speed: 2, crop: cropKeys(ease) })])))
+    const graph = result.files[0]!.content
+    expect(graph).toContain('setpts=(PTS-STARTPTS)/2,fps=30,tpad=stop_mode=clone:stop_duration=0.050,trim=duration=0.750,settb=AVTB,setpts=N/(30*TB),scale=iw:ih:in_range=auto:out_range=tv,format=yuv420p,geq=')
+    expect(graph).toContain('if(eq(ld(0),N+1),0,st(0,N+1);st(1,if(lt((N/30)+1e-9,0.875)')
+    expect(graph).toContain(':interpolation=bilinear,scale=320:240,setsar=1')
+    if (ease === 'hold') expect(graph).not.toContain('clip(((N/30)-')
+    else expect(graph).toContain('clip(((N/30)-(-0.125))/(1),0,1)')
+    if (ease === 'easeInOut') expect(graph).toContain('*(3-2*clip(')
+  })
+  it('keeps full-frame sizing downstream while fitting a crop whose aspect differs from the output', () => {
+    const result = plan({ ...doc(track([clip('one', { crop: cropKeys() })])), output: { width: 400, height: 240, fps: 30 } })
+    expect(result.files[0]!.content).toContain('between(X,ld(7),ld(5))*between(Y,ld(8),ld(6))')
+    expect(result.files[0]!.content).toContain(':interpolation=bilinear,scale=400:240,setsar=1')
+  })
+  it('processes source alpha before animated width, and places overlays on their absolute output clock', () => {
+    const overlay = { x: { keys: [key(0, 0.2), key(2000, 0.8)] }, y: 0.5,
+      width: { keys: [key(0, 0.2), key(2000, 0.8)] }, opacity: { keys: [key(0, 0.2), key(2000, 0.8)] } }
+    const graph = plan(doc(overlayTrack([clip('one', { startMs: 501, inMs: 250, outMs: 1750, speed: 2, crop: cropKeys(), overlay })]))).files[0]!.content
+    expect(graph).toContain('format=yuva444p,geq=')
+    expect(graph).toContain('alpha(X*ld(1)+ld(3),Y*ld(2)+ld(4))*ld(9)')
+    expect(graph.indexOf('geq=')).toBeLessThan(graph.indexOf('scale=w='))
+    expect(graph).toContain(':eval=frame,tpad=stop_mode=clone:stop=1')
+    expect(graph).toContain('if(lt((round(t*30)/30-0.501)+1e-9,0.875)')
+    expect(graph).toContain(':eval=frame:format=yuv444:eof_action=pass')
+    expect(graph).toContain("lt(t,1.251)'")
+  })
+  it('keeps 31 crop segments in the filter file and caches each curve once per slice and frame', () => {
+    const keys = Array.from({ length: 32 }, (_, i) => key(i * 100, { x: 0, y: 0, width: 1 - i * 0.01, height: 1 - i * 0.01 }, 'easeInOut'))
+    const result = plan(doc(track([clip('one', { crop: { keys } })])))
+    expect(result.args.join(' ')).not.toContain('geq=')
+    expect(result.files[0]!.content).toContain('if(lt((N/30)+1e-9,3.1)')
+    expect(result.files[0]!.content).toContain('if(eq(ld(0),N+1),0,st(0,N+1)')
+    expect(result.files[0]!.content.length).toBeGreaterThan(30_000)
+  })
+  it('omits crop curves from overlay scaling when the animated crop aspect stays constant', () => {
+    const crop = { keys: [key(0, { x: 0, y: 0, width: 1, height: 1 }), key(2000, { x: 0, y: 0, width: 0.8, height: 0.8 })] }
+    const graph = plan(doc(overlayTrack([clip('one', { crop, overlay: { x: 0.5, y: 0.5, width: 0.5, opacity: 1 } })]))).files[0]!.content
+    const scaling = graph.match(/scale=w='[^']+':h='([^']+)':eval=frame/)![1]!
+    expect(scaling).not.toContain('if(')
+    expect(graph).toContain('st(3,0);st(4,0)')
+    const varying = { keys: [crop.keys[0]!, key(2000, { x: 0, y: 0, width: 0.8, height: 0.803 })] }
+    const other = plan(doc(overlayTrack([clip('one', { crop: varying, overlay: { x: 0.5, y: 0.5, width: 0.5, opacity: 1 } })]))).files[0]!.content
+    const height = other.match(/scale=w='[^']+':h='([^']+)':eval=frame/)![1]!
+    expect(height).toContain('if(lt(')
+    expect(height).toContain('n')
+    expect(height).not.toContain('N')
+  })
+})
+
 const available = (() => {
   try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); return true } catch { return false }
 })()
@@ -392,6 +472,8 @@ describe.skipIf(!available)('Timeline ffmpeg exports', () => {
   let grey: string
   let logo: string
   let pip: string
+  let markers: string
+  let markers16: string
   const results: RenderedTimeline[] = []
   const ffmpeg = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-nostdin', ...args], { stdio: 'pipe', windowsHide: true, maxBuffer: 16 * 1024 * 1024 })
   const probe = (path: string) => JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', path], { encoding: 'utf8', windowsHide: true })) as { streams: { codec_type: string; codec_name: string; width?: number; height?: number; channels?: number; sample_rate?: string }[]; format: { duration: string } }
@@ -403,6 +485,8 @@ describe.skipIf(!available)('Timeline ffmpeg exports', () => {
     ['grey', { kind: 'video', path: grey, durationMs: 2000 }],
     ['logo', { kind: 'image', path: logo }],
     ['pip', { kind: 'video', path: pip, durationMs: 2000 }],
+    ['markers', { kind: 'video', path: markers, durationMs: 2000 }],
+    ['markers16', { kind: 'image', path: markers16 }],
   ])
   async function render(d: TimelineDoc, options: Partial<Parameters<typeof renderTimeline>[2]> = {}) {
     const result = await renderTimeline(d, sources(), { encoder, ...options })
@@ -418,11 +502,15 @@ describe.skipIf(!available)('Timeline ffmpeg exports', () => {
     grey = join(dir, 'grey.mp4')
     logo = join(dir, 'logo.png')
     pip = join(dir, 'pip.mp4')
+    markers = join(dir, 'markers.mp4')
+    markers16 = join(dir, 'markers16.png')
     ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-y', one])
     ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', '-y', two])
     ffmpeg(['-f', 'lavfi', '-i', 'sine=frequency=660:duration=3', '-y', music])
     ffmpeg(['-f', 'lavfi', '-i', 'color=red:size=320x240', '-frames:v', '1', '-y', image])
     ffmpeg(['-f', 'lavfi', '-i', 'color=gray:size=320x240:rate=30:duration=2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', '-y', grey])
+    ffmpeg(['-f', 'lavfi', '-i', 'color=black:size=320x240:rate=30:duration=2,drawbox=x=96:y=90:w=8:h=20:color=white:t=fill,drawbox=x=224:y=170:w=8:h=20:color=white:t=fill', '-c:v', 'mpeg4', '-q:v', '2', '-y', markers])
+    ffmpeg(['-i', markers, '-frames:v', '1', '-pix_fmt', 'rgb48be', '-y', markers16])
     ffmpeg(['-f', 'lavfi', '-i', 'color=red:size=160x80:rate=24:duration=1', '-f', 'lavfi', '-i', 'color=blue:size=160x80:rate=24:duration=1', '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=2', '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0[v]', '-map', '[v]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-y', pip])
     const rgba = Buffer.alloc(80 * 40 * 4)
     for (let y = 8; y < 32; y++) for (let x = 8; x < 72; x++) {
@@ -442,6 +530,62 @@ describe.skipIf(!available)('Timeline ffmpeg exports', () => {
     const pixel = frame.subarray((y * 320 + x) * 3, (y * 320 + x) * 3 + 3)
     expected.forEach((value, channel) => expect(Math.abs(pixel[channel]! - value)).toBeLessThan(9))
   }
+  it.each([['linear', 2], ['easeInOut', 2], ['hold', 2], ['hold', 3], ['hold', 0.3]] as const)('matches clipTransformAt within one pixel for %s crop at %s speed with trims and letterboxing', async (ease, speed) => {
+    const boundary = speed === 3 ? 1000 : 10
+    const crop = speed === 2 ? cropKeys(ease) : { keys: [key(0, { x: 0, y: 0, width: 1, height: 1 }, 'hold'), key(boundary, { x: 0.1, y: 0.1, width: 0.8, height: 0.8 }, 'hold')] }
+    const c = clip('markers', { inMs: speed === 2 ? 500 : 0, outMs: speed === 0.3 ? 30 : speed === 2 ? 1500 : 2000, speed, crop })
+    const output = { width: 400, height: 240, fps: 30 }
+    const result = await render({ ...doc(track([c])), output })
+    for (const index of speed === 3 ? [0, 9, 10] : speed === 0.3 ? [0, 1, 2] : [0, 7, 14]) {
+      const frame = ffmpeg(['-i', result.path, '-vf', `select='eq(n,${index})'`, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'])
+      const transform = clipTransformAt(c, sourceTimeAt(c, index / 30 * 1000), output, { width: 320, height: 240 })
+      expect(frame.length).toBe(output.width * output.height * 3)
+      for (const [x, y] of [[99.5, 99.5], [227.5, 179.5]]) {
+        const expectedX = transform.rect.x + (x! + 0.5 - transform.crop.x) / transform.crop.width * transform.rect.width - 0.5
+        const expectedY = transform.rect.y + (y! + 0.5 - transform.crop.y) / transform.crop.height * transform.rect.height - 0.5
+        let mass = 0
+        let sumX = 0
+        let sumY = 0
+        for (let py = Math.floor(expectedY - 20); py <= expectedY + 20; py++) for (let px = Math.floor(expectedX - 15); px <= expectedX + 15; px++) {
+          const value = frame[(py * output.width + px) * 3]!
+          if (value < 8) continue
+          mass += value
+          sumX += px * value
+          sumY += py * value
+        }
+        expect(mass).toBeGreaterThan(0)
+        expect(Math.abs(sumX / mass - expectedX)).toBeLessThanOrEqual(1)
+        expect(Math.abs(sumY / mass - expectedY)).toBeLessThanOrEqual(1)
+      }
+    }
+  }, 20_000)
+  it('animates overlay crop, position, width and opacity without losing transparent source borders', async () => {
+    const animated = (a: number, b: number) => ({ keys: [key(0, a), key(1000, b)] })
+    const c = overlayClip({ source: { nodeId: 'logo-node', assetVersionId: 'logo' }, startMs: 500, outMs: 1000,
+      crop: { keys: [key(0, { x: 0, y: 0, width: 1, height: 1 }), key(1000, { x: 0.1, y: 0.1, width: 0.8, height: 0.8 })] },
+      overlay: { x: animated(0.3, 0.7), y: animated(0.4, 0.6), width: animated(0.2, 0.5), opacity: animated(0.2, 0.8) } })
+    const result = await render(doc(track([clip('grey')]), overlayTrack([c])))
+    for (const ms of [600, 1000, 1400]) {
+      const frame = frameAt(result.path, ms)
+      const transform = clipTransformAt(c, sourceTimeAt(c, ms), { width: 320, height: 240 }, { width: 80, height: 40 })
+      expectPixel(frame, transform.rect.x + transform.rect.width / 2, transform.rect.y + transform.rect.height / 2,
+        [255 * transform.opacity + 128 * (1 - transform.opacity), 128 * (1 - transform.opacity), 128 * (1 - transform.opacity)])
+      expectPixel(frame, transform.rect.x + Math.floor(transform.rect.width * 0.75), transform.rect.y + transform.rect.height / 2,
+        [255 * transform.opacity + 128 * (1 - transform.opacity), 128 * (1 - transform.opacity), 128 * (1 - transform.opacity)])
+      expectPixel(frame, transform.rect.x + 1, transform.rect.y + 1, [128, 128, 128])
+      expectPixel(frame, transform.rect.x + transform.rect.width + 2, transform.rect.y + transform.rect.height / 2, [128, 128, 128])
+    }
+    expectPixel(frameAt(result.path, 1500), 160, 120, [128, 128, 128])
+  }, 20_000)
+  it('keeps fitted bars neutral black for a high-depth RGB source', async () => {
+    const result = await render({ ...doc(track([clip('markers16', { outMs: 1000, crop: cropKeys() })])), output: { width: 400, height: 240, fps: 30 } })
+    const frame = frameAt(result.path, 500)
+    expect(frame.length).toBe(400 * 240 * 3)
+    for (const x of [10, 390]) {
+      const pixel = frame.subarray((120 * 400 + x) * 3, (120 * 400 + x) * 3 + 3)
+      expect([...pixel].every(channel => channel < 4)).toBe(true)
+    }
+  }, 20_000)
   it.each([1, 2])('exports overlay video pixels and sound only within its timeline interval at speed %s', async speed => {
     const c = overlayClip({ source: { nodeId: 'pip-node', assetVersionId: 'pip' }, startMs: 500, inMs: speed === 1 ? 250 : 0, outMs: speed === 1 ? 1250 : 2000, speed, overlay: { x: 0.75, y: 0.75, width: 0.5, opacity: 1 } })
     const result = await render(doc(track([clip('grey')]), overlayTrack([c])))

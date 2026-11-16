@@ -1,9 +1,10 @@
 import { delimiter, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import type { Options, Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import type { ModelInfo, Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { and, eq, openSpaceDb, spaceSchema as s, type SpaceDb } from '@vis/storage'
+import { VisError } from '@vis/domain'
 import { createSessionService, type SessionService } from '@vis/workbench-core'
 import { createClaudeRuntime, type ClaudeRuntimeOptions } from './adapter'
 
@@ -13,7 +14,9 @@ class FakeQuery {
   private wake: (() => void) | undefined
   interrupted = false
   ignoreAbort = false
-  constructor(readonly options: Options, readonly prompt: string) {
+  closed = false
+  readModels = vi.fn<() => Promise<ModelInfo[]>>(async () => catalogModels)
+  constructor(readonly options: Options, readonly prompt: string | AsyncIterable<SDKUserMessage>) {
     options.abortController?.signal.addEventListener('abort', () => { if (!this.ignoreAbort) this.push(new Error('aborted')) })
   }
   push(item: SDKMessage | Error | 'end') {
@@ -33,10 +36,19 @@ class FakeQuery {
     const gen = this.iterate()
     return Object.assign(gen, {
       interrupt: async () => { this.interrupted = true; this.push(result('error_during_execution')); this.push('end'); return undefined },
-      close: () => {},
+      close: () => { this.closed = true },
+      supportedModels: () => this.readModels(),
     }) as unknown as Query
   }
 }
+
+const catalogModels: ModelInfo[] = [
+  { value: 'default', resolvedModel: 'claude-opus-test', displayName: 'Default model', description: 'SDK default', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  { value: 'opus', resolvedModel: 'claude-opus-test', displayName: 'Opus', description: 'Opus model', supportsEffort: true, supportedEffortLevels: ['low', 'high', 'max'] },
+  { value: 'sonnet', resolvedModel: 'claude-sonnet-test', displayName: 'Sonnet', description: 'Sonnet model', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high'] },
+  { value: 'haiku', displayName: 'Haiku', description: 'Haiku model', supportsEffort: false, supportedEffortLevels: ['high'] },
+  { value: 'fable', displayName: 'Fable', description: 'Fable model' },
+]
 
 let db: SpaceDb
 let sessions: SessionService
@@ -64,7 +76,7 @@ beforeEach(() => {
   nextQuery = undefined
   homeDir = mkdtempSync(join(tmpdir(), 'vis-claude-settings-'))
   environment = { PATH: '/usr/bin', HOME: homeDir }
-  sessions = createSessionService({ db, runtime: { ensureReady: id => runtime.ensureReady(id), dispatchTurn: i => runtime.dispatchTurn(i), terminateTurn: i => runtime.terminateTurn(i), interruptTurn: i => runtime.interruptTurn(i) }, now: () => ++clock })
+  sessions = createSessionService({ db, runtime: { agentOptions: (kind, options) => runtime.agentOptions(kind, options), ensureReady: id => runtime.ensureReady(id), dispatchTurn: i => runtime.dispatchTurn(i), terminateTurn: i => runtime.terminateTurn(i), interruptTurn: i => runtime.interruptTurn(i) }, now: () => ++clock })
   runtimeOptions = {
     query: ({ prompt, options }) => {
       const q = new FakeQuery(options!, prompt)
@@ -75,6 +87,8 @@ beforeEach(() => {
     workDir: id => join(tmpdir(), 'vis-test-work', `${id}`),
     issueToken: () => ({ token: `spc_1.tok${++tokenSeq}`, tokenHash: `hash${tokenSeq}` }),
     socketPath: '/tmp/vis.sock',
+    sandboxAvailable: () => false,
+    visMcp: { command: process.execPath, args: ['vis.mjs', 'mcp'] },
     cliBinDir: '/opt/vis/bin',
     fallbackDirs,
     initTimeoutMs: 200,
@@ -94,7 +108,7 @@ afterEach(async () => {
 
 let req = 0
 function newSession() {
-  return sessions.create({ requestId: `r${++req}`, title: '分镜' }).sessionId
+  return sessions.create({ requestId: `r${++req}`, title: '分镜', agentKind: 'claude' }).sessionId
 }
 function send(sessionId: string, text: string) {
   return sessions.sendMessage({ requestId: `r${++req}`, sessionId, text, refs: [] })
@@ -113,6 +127,243 @@ function writeSettings(settings: unknown, configDir = join(homeDir, '.claude')) 
   mkdirSync(configDir, { recursive: true })
   writeFileSync(join(configDir, 'settings.json'), JSON.stringify(settings))
 }
+
+describe('Claude model catalog', () => {
+  it('maps SDK aliases and per-model efforts without creating a session, turn or valid gateway token', async () => {
+    const models = await runtime.agentOptions('claude', {})
+    expect(models).toEqual(catalogModels.map(model => ({
+      id: model.value, label: model.displayName, description: model.description,
+      isDefault: model.value === 'default',
+      efforts: model.supportsEffort === true ? model.supportedEffortLevels!.map(id => ({ id, label: id })) : [],
+      defaultEffort: null, serviceTiers: [],
+    })))
+    const probe = calls[0]!
+    expect(probe.closed).toBe(true)
+    expect(probe.options.abortController!.signal.aborted).toBe(true)
+    expect(typeof probe.prompt).toBe('object')
+    expect(await (probe.prompt as AsyncIterable<SDKUserMessage>)[Symbol.asyncIterator]().next()).toEqual({ done: true, value: undefined })
+    expect(probe.options.persistSession).toBe(false)
+    expect(existsSync(probe.options.cwd!)).toBe(false)
+    expect(db.select().from(s.sessions).all()).toEqual([])
+    expect(db.select().from(s.turns).all()).toEqual([])
+    expect(db.select().from(s.agentInstances).all()).toEqual([])
+    expect(tokenSeq).toBe(1)
+  })
+
+  it.each(['sonnet', 'claude-sonnet-test'])('marks the configured default %s by exact alias or resolved model', async model => {
+    runtimeOptions.model = model
+    const models = await runtime.agentOptions('claude', {})
+    expect(models.filter(option => option.isDefault).map(option => option.id)).toEqual(['sonnet'])
+    expect(calls[0]!.options.model).toBe(model)
+  })
+
+  it('adds an unlisted configured model as the only default without guessing effort support', async () => {
+    runtimeOptions.model = 'custom-proxy-model'
+    const models = await runtime.agentOptions('claude', {})
+    expect(models.filter(model => model.isDefault)).toEqual([{ id: 'custom-proxy-model', label: 'custom-proxy-model', isDefault: true, efforts: [], defaultEffort: null, serviceTiers: [] }])
+    expect(models).toHaveLength(catalogModels.length + 1)
+  })
+
+  it('uses the first resolved match as the only default and preserves its declared efforts', async () => {
+    runtimeOptions.model = 'claude-opus-test'
+    const models = await runtime.agentOptions('claude', {})
+    expect(models.filter(model => model.isDefault).map(model => model.id)).toEqual(['default'])
+    expect(models.find(model => model.isDefault)!.efforts.map(effort => effort.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  it.each(['ANTHROPIC_API_KEY', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'AWS_REGION', 'AWS_PROFILE', 'CLOUD_ML_REGION'])('invalidates cached models when forwarded %s settings change', async key => {
+    writeSettings({ env: { [key]: 'test-first-auth' } })
+    await runtime.agentOptions('claude', {})
+    writeSettings({ env: { [key]: 'test-second-auth' } })
+    await runtime.agentOptions('claude', {})
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.options.env![key]).toBe('test-second-auth')
+  })
+
+  it('hashes merged auth values consistently and ignores unrelated or overridden exports', async () => {
+    writeSettings({ env: { ANTHROPIC_API_KEY: 'test-settings-value', AWS_PROFILE: 'test-profile' } })
+    environment.ANTHROPIC_API_KEY = 'test-export-value'
+    await runtime.agentOptions('claude', {})
+    environment.ANTHROPIC_API_KEY = 'test-other-export'
+    environment.OTHER_ENV = 'test-ignored'
+    writeSettings({ env: { AWS_PROFILE: 'test-profile', ANTHROPIC_API_KEY: 'test-settings-value' } })
+    await runtime.agentOptions('claude', {})
+    expect(calls).toHaveLength(1)
+    rmSync(join(homeDir, '.claude', 'settings.json'))
+    await runtime.agentOptions('claude', {})
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.options.env!.ANTHROPIC_API_KEY).toBe('test-other-export')
+    environment.ANTHROPIC_API_KEY = ''
+    await runtime.agentOptions('claude', {})
+    expect(calls).toHaveLength(3)
+  })
+
+  it('shares probes only for matching auth hashes and reuses matching cached catalogs', async () => {
+    let release!: (models: ModelInfo[]) => void
+    nextQuery = q => {
+      if (calls.length === 1) q.readModels.mockReturnValue(new Promise<ModelInfo[]>(resolve => { release = resolve }))
+    }
+    environment.ANTHROPIC_API_KEY = 'test-first-auth'
+    const first = runtime.agentOptions('claude', {})
+    await until(() => calls.length === 1)
+    environment.ANTHROPIC_API_KEY = 'test-second-auth'
+    const second = await runtime.agentOptions('claude', {})
+    expect(calls).toHaveLength(2)
+    release(catalogModels)
+    const previous = await first
+    expect(second).not.toBe(previous)
+    environment.ANTHROPIC_API_KEY = 'test-first-auth'
+    expect(await runtime.agentOptions('claude', {})).toBe(previous)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('uses a dedicated fifteen-second catalog timeout independently of turn startup', async () => {
+    const timer = vi.spyOn(globalThis, 'setTimeout')
+    try {
+      runtimeOptions.initTimeoutMs = 1
+      await runtime.agentOptions('claude', {})
+      expect(timer).toHaveBeenCalledWith(expect.any(Function), 15_000)
+      expect(timer).not.toHaveBeenCalledWith(expect.any(Function), 1)
+    } finally { timer.mockRestore() }
+  })
+
+  it('caches success per runtime and shares concurrent catalog reads', async () => {
+    let release!: (models: ModelInfo[]) => void
+    const gate = new Promise<ModelInfo[]>(resolve => { release = resolve })
+    nextQuery = q => { q.readModels.mockReturnValue(gate) }
+    const first = runtime.agentOptions('claude', {})
+    const second = runtime.agentOptions('claude', { model: 'sonnet' })
+    await until(() => calls.length === 1)
+    expect(calls[0]!.readModels).toHaveBeenCalledTimes(1)
+    release(catalogModels)
+    expect(await second).toBe(await first)
+    expect(await runtime.agentOptions('claude', {})).toBe(await first)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('uses turn authentication, PATH and spawn setup while keeping settings sources disabled', async () => {
+    writeSettings({ env: { ANTHROPIC_BASE_URL: 'https://example.com', ANTHROPIC_DEFAULT_SONNET_MODEL: 'mapped-model', AWS_PROFILE: 'test-profile', OTHER_ENV: 'ignored' } })
+    environment.ANTHROPIC_BASE_URL = 'https://example.com/export'
+    fallbackDirs.push('/app/tools')
+    runtimeOptions.platform = 'win32'
+    runtimeOptions.dataDir = join(homeDir, 'data')
+    delete environment.PATH
+    environment.Path = '/user/tools'
+    await runtime.agentOptions('claude', {})
+    const probe = calls[0]!
+    expect(probe.options).toMatchObject({
+      settingSources: [], permissionMode: 'default', canUseTool: expect.any(Function),
+      spawnClaudeCodeProcess: expect.any(Function),
+      env: { ANTHROPIC_BASE_URL: 'https://example.com', ANTHROPIC_DEFAULT_SONNET_MODEL: 'mapped-model', AWS_PROFILE: 'test-profile', PATH: ['/opt/vis/bin', '/user/tools', '/app/tools'].join(delimiter), CLAUDE_AGENT_SDK_CLIENT_APP: 'vis-creative' },
+    })
+    expect(probe.options.tools).toBeUndefined()
+    expect(probe.options.allowedTools).toBeUndefined()
+    expect(probe.options.mcpServers).toBeUndefined()
+    expect(probe.options.env).not.toHaveProperty('VIS_AGENT_TOKEN')
+    expect(probe.options.env).not.toHaveProperty('Path')
+    expect(probe.options.env).not.toHaveProperty('OTHER_ENV')
+    expect(environment.Path).toBe('/user/tools')
+  })
+
+  it.each(['reject', 'throw', 'empty'] as const)('rejects with a sanitized VisError after %s and retries with fresh settings', async failure => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      nextQuery = q => {
+        if (failure === 'throw') throw new Error('test-auth-value')
+        if (failure === 'reject') q.readModels.mockRejectedValue(new Error('test-auth-value'))
+        else q.readModels.mockResolvedValue([])
+      }
+      const error = await runtime.agentOptions('claude', {}).catch(error => error)
+      expect(error).toBeInstanceOf(VisError)
+      expect(error).toMatchObject({ code: 'unavailable', message: 'Cannot read the Claude model catalog', details: { reason: 'session.models_unavailable' } })
+      expect(JSON.stringify(error)).not.toContain('test-auth-value')
+      if (failure !== 'throw') expect(calls[0]!.closed).toBe(true)
+      writeSettings({ env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'retry-mapping' } })
+      nextQuery = undefined
+      expect((await runtime.agentOptions('claude', {}))[0]!.label).toBe('Default model')
+      expect(calls).toHaveLength(2)
+      expect(calls[1]!.options.env!.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('retry-mapping')
+      expect(log).not.toHaveBeenCalled()
+    } finally { log.mockRestore() }
+  })
+
+  it('times out, closes the query and ignores its late catalog before retrying', async () => {
+    runtimeOptions.catalogTimeoutMs = 10
+    let release!: (models: ModelInfo[]) => void
+    nextQuery = q => { q.readModels.mockReturnValue(new Promise<ModelInfo[]>(resolve => { release = resolve })) }
+    await expect(runtime.agentOptions('claude', {})).rejects.toMatchObject({ code: 'unavailable' })
+    expect(calls[0]!.closed).toBe(true)
+    expect(calls[0]!.options.abortController!.signal.aborted).toBe(true)
+    release(catalogModels)
+    nextQuery = undefined
+    expect((await runtime.agentOptions('claude', {}))[0]!.label).toBe('Default model')
+    expect(calls).toHaveLength(2)
+  })
+
+  it('disposal closes an in-flight catalog query and rejects later reads', async () => {
+    nextQuery = q => { q.readModels.mockReturnValue(new Promise(() => {})) }
+    const pending = expect(runtime.agentOptions('claude', {})).rejects.toMatchObject({ code: 'unavailable' })
+    await until(() => calls.length === 1)
+    await runtime.dispose()
+    await pending
+    expect(calls[0]!.closed).toBe(true)
+    expect(calls[0]!.options.abortController!.signal.aborted).toBe(true)
+    await expect(runtime.agentOptions('claude', {})).rejects.toBeInstanceOf(VisError)
+  })
+
+  it.each(['success', 'timeout', 'close failure'] as const)('waits for the catalog process to exit after %s', async state => {
+    runtimeOptions.catalogTimeoutMs = state === 'timeout' ? 50 : 2000
+    let child!: ReturnType<NonNullable<Options['spawnClaudeCodeProcess']>>
+    nextQuery = q => {
+      child = q.options.spawnClaudeCodeProcess!({ command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], cwd: q.options.cwd!, env: q.options.env!, signal: q.options.abortController!.signal })
+      if (state === 'timeout') q.readModels.mockReturnValue(new Promise(() => {}))
+      if (state === 'close failure') {
+        const asQuery = q.asQuery.bind(q)
+        q.asQuery = () => Object.assign(asQuery(), { close: () => { throw new Error('test-close-failure') } })
+      }
+    }
+    if (state === 'timeout') await expect(runtime.agentOptions('claude', {})).rejects.toMatchObject({ code: 'unavailable' })
+    else await runtime.agentOptions('claude', {})
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true)
+    expect(existsSync(calls[0]!.options.cwd!)).toBe(false)
+  })
+
+  it('keeps concurrent callers waiting until catalog process cleanup finishes', async () => {
+    let overlapping!: Promise<unknown>
+    nextQuery = q => {
+      const child = q.options.spawnClaudeCodeProcess!({ command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], cwd: q.options.cwd!, env: q.options.env!, signal: q.options.abortController!.signal })
+      const asQuery = q.asQuery.bind(q)
+      q.asQuery = () => {
+        const query = asQuery()
+        const close = query.close.bind(query)
+        query.close = () => {
+          close()
+          overlapping = runtime.agentOptions('claude', {}).then(models => {
+            expect(child.exitCode !== null || child.signalCode !== null).toBe(true)
+            return models
+          })
+        }
+        return query
+      }
+    }
+    const models = await runtime.agentOptions('claude', {})
+    expect(await overlapping).toBe(models)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('rejects a deferred SDK spawn after the catalog query has closed', async () => {
+    await runtime.agentOptions('claude', {})
+    const options = calls[0]!.options
+    expect(() => options.spawnClaudeCodeProcess!({ command: process.execPath, args: [], env: options.env!, signal: new AbortController().signal })).toThrow('Runtime has stopped')
+  })
+
+  it('does not start a catalog query when disposed during the settings read', async () => {
+    const pending = expect(runtime.agentOptions('claude', {})).rejects.toMatchObject({ code: 'unavailable' })
+    await runtime.dispose()
+    await pending
+    expect(calls).toHaveLength(0)
+  })
+})
 
 describe('Claude settings environment', () => {
   it('forwards only ANTHROPIC and explicit auth string values without loading user settings', async () => {
@@ -168,15 +419,18 @@ describe('Claude settings environment', () => {
       AWS_REGION: 'test-region',
       AWS_PROFILE: 'test-profile',
       CLOUD_ML_REGION: 'test-cloud-region',
+      AWS_ACCESS_KEY_ID: 'test-access-key',
+      AWS_SECRET_ACCESS_KEY: 'test-secret-key',
+      AWS_SESSION_TOKEN: 'test-session-token',
+      CLAUDE_CONFIG_DIR: join(homeDir, '.claude'),
       PATH: ['/opt/vis/bin', '/usr/bin'].join(delimiter),
       HOME: homeDir,
-      VIS_SOCKET: '/tmp/vis.sock',
-      VIS_AGENT_TOKEN: 'spc_1.tok1',
       CLAUDE_AGENT_SDK_CLIENT_APP: 'vis-creative',
+      CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
     })
     expect(options.settingSources).toEqual([])
-    expect(options.tools).toEqual(['Bash', 'Read', 'Glob', 'Grep'])
-    expect(options.allowedTools).toEqual(['Bash(vis:*)', 'Read', 'Glob', 'Grep'])
+    expect(options.tools).toEqual(['Read', 'Glob', 'Grep'])
+    expect(options.allowedTools).toEqual(['mcp__vis__*', 'Read', 'Glob', 'Grep'])
     expect(options.permissionMode).toBe('dontAsk')
     expect(options.model).toBeUndefined()
     expect(options).not.toHaveProperty('hooks')
@@ -197,9 +451,8 @@ describe('Claude settings environment', () => {
       ANTHROPIC_AUTH_TOKEN: 'test-settings-token',
       ANTHROPIC_API_KEY: 'test-settings-key',
       ANTHROPIC_BASE_URL: 'https://example.com',
-      VIS_SOCKET: '/tmp/vis.sock',
-      VIS_AGENT_TOKEN: 'spc_1.tok1',
       CLAUDE_AGENT_SDK_CLIENT_APP: 'vis-creative',
+      CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
     })
     expect(environment.ANTHROPIC_AUTH_TOKEN).toBe('test-export-token')
     expect(environment.ANTHROPIC_BASE_URL).toBe('https://example.com/export')
@@ -228,7 +481,7 @@ describe('Claude settings environment', () => {
     nextQuery = q => q.push(init())
     send(newSession(), 'Test')
     await sessions.idle()
-    expect(Object.keys(calls[0]!.options.env!).sort()).toEqual(['CLAUDE_AGENT_SDK_CLIENT_APP', 'HOME', 'PATH', 'VIS_AGENT_TOKEN', 'VIS_SOCKET'])
+    expect(Object.keys(calls[0]!.options.env!).sort()).toEqual(['CLAUDE_AGENT_SDK_CLIENT_APP', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CONFIG_DIR', 'HOME', 'PATH'])
   })
 
   it('honors CLAUDE_CONFIG_DIR over the source HOME', async () => {
@@ -264,6 +517,7 @@ describe('Claude settings environment', () => {
   it('uses the source USERPROFILE when HOME is absent on Windows', async () => {
     writeSettings({ env: { ANTHROPIC_AUTH_TOKEN: 'test-profile-token' } })
     runtimeOptions.platform = 'win32'
+    runtimeOptions.dataDir = join(homeDir, 'data')
     delete environment.HOME
     environment.USERPROFILE = homeDir
     nextQuery = q => q.push(init())
@@ -277,6 +531,7 @@ describe('Claude settings environment', () => {
     const profile = join(homeDir, 'profile')
     writeSettings({ env: { ANTHROPIC_AUTH_TOKEN: 'test-profile-token' } }, join(profile, '.claude'))
     runtimeOptions.platform = 'win32'
+    runtimeOptions.dataDir = join(homeDir, 'data')
     environment.USERPROFILE = profile
     nextQuery = q => q.push(init())
     send(newSession(), 'Test')
@@ -332,6 +587,58 @@ describe('Claude settings environment', () => {
 })
 
 describe('A single turn', () => {
+  it.each(['low', 'medium', 'high', 'xhigh', 'max'])('passes session model and effort %s over the runtime default', async effort => {
+    runtimeOptions.model = 'sonnet'
+    nextQuery = q => { q.readModels.mockResolvedValue(catalogModels.map(model => model.value === 'opus' ? { ...model, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] } : model)) }
+    const sid = newSession()
+    await sessions.setAgentConfig({ requestId: `config-${effort}`, sessionId: sid, model: 'opus', effort, serviceTier: 'default' })
+    nextQuery = q => q.push(init())
+    send(sid, 'Configured turn')
+    await sessions.idle()
+    expect(calls.at(-1)!.options).toMatchObject({ model: 'opus', effort })
+    expect(calls.at(-1)!.options).not.toHaveProperty('serviceTier')
+  })
+
+  it.each([null, 'invalid', 'minimal', 'HIGH', ''])('drops unsupported effort %j and falls back to the runtime model', async effort => {
+    runtimeOptions.model = 'sonnet'
+    const sid = newSession()
+    nextQuery = q => q.push(init())
+    await runtime.dispatchTurn({ sessionId: sid, turnId: `turn-${effort}`, sessionTitle: 'Test', titleSource: 'user', text: 'Test', refs: [], inputSnapshotId: 'snapshot', resumeId: null, agentConfig: { model: null, effort, serviceTier: 'fast' } })
+    expect(calls[0]!.options.model).toBe('sonnet')
+    expect(calls[0]!.options).not.toHaveProperty('effort')
+    expect(calls[0]!.options).not.toHaveProperty('serviceTier')
+  })
+
+  it.each([undefined, 'sonnet'])('treats the session default alias as unset with runtime model %s', async model => {
+    if (model === undefined) delete runtimeOptions.model
+    else runtimeOptions.model = model
+    const sid = newSession()
+    await sessions.setAgentConfig({ requestId: 'default-alias', sessionId: sid, model: 'default', effort: null, serviceTier: null })
+    nextQuery = q => q.push(init())
+    send(sid, 'Use defaults')
+    await sessions.idle()
+    expect(calls.at(-1)!.options.model).toBe(model)
+    if (model === undefined) expect(calls.at(-1)!.options).not.toHaveProperty('model')
+  })
+
+  it('dispatches with the runtime default after catalog discovery fails', async () => {
+    runtimeOptions.model = 'custom-proxy-model'
+    nextQuery = q => { q.readModels.mockRejectedValue(new Error('test-auth-value')) }
+    await expect(runtime.agentOptions('claude', {})).rejects.toBeInstanceOf(VisError)
+    nextQuery = q => q.push(init())
+    send(newSession(), 'Continue without a catalog')
+    await sessions.idle()
+    expect(calls.at(-1)!.options.model).toBe('custom-proxy-model')
+  })
+
+  it('leaves model and effort to the SDK when session and runtime defaults are unset', async () => {
+    nextQuery = q => q.push(init())
+    send(newSession(), 'Default turn')
+    await sessions.idle()
+    expect(calls[0]!.options).not.toHaveProperty('model')
+    expect(calls[0]!.options).not.toHaveProperty('effort')
+  })
+
   it('appends packaged media after the user PATH for the SDK Agent', async () => {
     fallbackDirs.push('/app/ffmpeg')
     nextQuery = q => q.push(init())
@@ -362,6 +669,7 @@ describe('A single turn', () => {
 
   it('Windows: merge Path and PATH, preserve system environment, and leave the caller object unchanged', async () => {
     runtimeOptions.platform = 'win32'
+    runtimeOptions.dataDir = join(homeDir, 'data')
     delete environment.PATH
     environment.Path = 'C:\\Windows\\System32'
     environment.SystemRoot = 'C:\\Windows'
@@ -374,7 +682,7 @@ describe('A single turn', () => {
     expect(environment.Path).toBe('C:\\Windows\\System32')
     expect(environment.PATH).toBeUndefined()
   })
-  it('Startup arguments: restrict tools, reject others, and inject token and socket', async () => {
+  it('Startup arguments: restrict fallback tools and isolate the MCP transport credentials', async () => {
     const sid = newSession()
     nextQuery = q => q.push(init())
     send(sid, '写一段旁白')
@@ -384,11 +692,11 @@ describe('A single turn', () => {
     expect(prompt).toBe(`写一段旁白\n\n<工作项>\n所属工作项：${workItemId}\n父工作项：无（根工作区）\n有子工作项：否\n</工作项>`)
     expect(options).toMatchObject({
       cwd: join(tmpdir(), 'vis-test-work', `${sid}`),
-      tools: ['Bash', 'Read', 'Glob', 'Grep'],
-      allowedTools: ['Bash(vis:*)', 'Read', 'Glob', 'Grep'],
+      tools: ['Read', 'Glob', 'Grep'],
+      allowedTools: ['mcp__vis__*', 'Read', 'Glob', 'Grep'],
       permissionMode: 'dontAsk',
       settingSources: [],
-      env: { VIS_SOCKET: '/tmp/vis.sock', VIS_AGENT_TOKEN: 'spc_1.tok1', PATH: ['/opt/vis/bin', '/usr/bin'].join(delimiter), HOME: homeDir },
+      env: { PATH: ['/opt/vis/bin', '/usr/bin'].join(delimiter), HOME: homeDir },
     })
     expect(options.resume).toBeUndefined()
   })
@@ -472,6 +780,33 @@ describe('Failure and interruption', () => {
     expect(message(a.messageId).deliveryState).toBe('unknown')
     expect(notices(sid)).toEqual(['dispatch_unknown'])
     expect(instances(sid)[0]).toMatchObject({ status: 'exited', exitReason: 'start_timeout' })
+  })
+
+  it('an interrupt between query creation and spawn still spawns and ends as interrupted', async () => {
+    let child!: ReturnType<NonNullable<Options['spawnClaudeCodeProcess']>>
+    let spawnError: unknown
+    nextQuery = q => {
+      q.ignoreAbort = true
+      q.options.abortController!.signal.addEventListener('abort', () => {
+        try {
+          const signal = new AbortController()
+          child = q.options.spawnClaudeCodeProcess!({ command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], env: q.options.env!, signal: signal.signal })
+          signal.abort()
+        } catch (error) { spawnError = error }
+        finally { q.push(new Error('interrupted startup')) }
+      }, { once: true })
+    }
+    const sid = newSession()
+    const sent = send(sid, 'Deferred spawn')
+    await until(() => calls.length === 1)
+    await sessions.stop({ requestId: 'stop-deferred-spawn', sessionId: sid, turnId: turnOf(sent.messageId).id })
+    await sessions.idle()
+    expect(spawnError).toBeUndefined()
+    expect(child).toBeDefined()
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true)
+    expect(turnOf(sent.messageId).status).toBe('interrupted')
+    expect(instances(sid)[0]!.exitReason).toBe('interrupted')
+    expect(notices(sid)).not.toContain('dispatch_rejected')
   })
 
   it('User stop: interrupt this call and classify the turn as interrupted', async () => {

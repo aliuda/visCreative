@@ -6,6 +6,7 @@ import { usePlaybackClock } from './player'
 import { TimelineArea } from './TimelineArea'
 import { Inspector, OutputSettings } from './Inspector'
 import { MediaBin } from './MediaBin'
+import { createPlacementGestures } from './overlay/gesture'
 import { Preview } from './Preview'
 import type { TimelineEditorHost } from './types'
 import { timelineShellMessages } from './shell-messages'
@@ -14,11 +15,15 @@ import { timecode } from './model/geometry'
 import { useMediaResources } from './model/resources'
 import { latestExport } from './model/media'
 import { effectiveFps, outputDescription } from './model/output'
+import { TransformEditorContext, useTransformEditorState } from './transform-context'
 import './timeline.css'
 
 export const TimelineEditor = memo(function TimelineEditor({ host }: { host: TimelineEditorHost }) {
   const draft = useTimelineDraft(host)
   const clock = usePlaybackClock(draft.doc)
+  const placementGestures = useMemo(createPlacementGestures, [])
+  const [cropId, editCrop] = useState<string | null>(null)
+  const transformEditor = useTransformEditorState(cropId, editCrop, draft.doc)
   const [selection, select] = useState<readonly string[]>([])
   const m = useMessages(timelineShellMessages)
   const format = useFormat()
@@ -35,13 +40,14 @@ export const TimelineEditor = memo(function TimelineEditor({ host }: { host: Tim
       return saved >= 200 ? Math.min(saved, window.innerHeight * 0.7) : window.innerHeight * 0.34
     } catch { return window.innerHeight * 0.34 }
   })
+  useEffect(() => { if (cropId && !selection.includes(cropId)) editCrop(null) }, [cropId, selection])
   const [error, setError] = useState<unknown>(null)
   const [pendingExit, setPendingExit] = useState<{ nodeId?: string } | null>(null)
   const [exporting, setExporting] = useState(false)
   const [toast, setToast] = useState<'done' | 'failed' | null>(null)
   const first = draft.doc.tracks.find(isMainVideoTrack)?.clips[0]
   const resources = useMediaResources(host, first ? [first.source.assetVersionId] : [])
-  const firstInfo = first ? resources.info.get(first.source.assetVersionId) : undefined
+  const firstInfo = first ? resources.resolvedInfo(first.source.assetVersionId) : undefined
   const latest = useRef({ host, draft, clock })
   latest.current = { host, draft, clock }
   const previousTask = useRef(host.exportTask?.status)
@@ -86,7 +92,7 @@ export const TimelineEditor = memo(function TimelineEditor({ host }: { host: Tim
   const close = () => leave()
   const navigate = (nodeId: string) => leave(nodeId)
   const wrappedHost = useMemo(() => ({ ...host, showOnCanvas: (nodeId: string) => { void leave(nodeId) } }), [host, leave])
-  const parts = { host: wrappedHost, draft, clock, selection, select }
+  const parts = { host: wrappedHost, draft, clock, placementGestures, selection, select }
   const runExport = async () => {
     if (exporting || busy) return
     setError(null)
@@ -116,7 +122,7 @@ export const TimelineEditor = memo(function TimelineEditor({ host }: { host: Tim
     setSplit(height)
     try { localStorage.setItem('vis.timeline.split', String(height)) } catch {}
   }
-  return <div ref={root} tabIndex={-1} className="vis-tl-editor" role="dialog" aria-modal="true" aria-label={host.node.title ?? m.timeline}
+  return <TransformEditorContext value={transformEditor}><div ref={root} tabIndex={-1} className="vis-tl-editor" role="dialog" aria-modal="true" aria-label={host.node.title ?? m.timeline}
     onPointerDownCapture={event => {
       if (!(event.target instanceof Element)) return
       const focusable = event.target.closest('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex], [contenteditable="true"]')
@@ -131,6 +137,7 @@ export const TimelineEditor = memo(function TimelineEditor({ host }: { host: Tim
       return
     }
     if (event.defaultPrevented || event.nativeEvent.isComposing) return
+    if (event.key === 'Escape' && cropId) { event.preventDefault(); editCrop(null); return }
     if (event.key === 'Escape' && document.fullscreenElement) {
       event.preventDefault()
       void document.exitFullscreen()
@@ -201,5 +208,5 @@ export const TimelineEditor = memo(function TimelineEditor({ host }: { host: Tim
       {toast === 'done' ? <button disabled={!exported} onClick={() => { if (exported) void navigate(exported.nodeId) }}>{m.showOnCanvas}</button> : <button onClick={() => void runExport()}>{m.retry}</button>}
       <button aria-label={m.dismiss} onClick={() => setToast(null)}>×</button>
     </div> : null}
-  </div>
+  </div></TransformEditorContext>
 })

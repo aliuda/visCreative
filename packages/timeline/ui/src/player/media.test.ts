@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TimelineClip, TimelineDoc } from '@vis/protocol'
+import type { MediaSize } from './transform'
 import type { EditorPartProps } from '../types'
 import { createMediaPlayer } from './media'
 
 class Media extends EventTarget {
-  style = { visibility: '', opacity: '', mixBlendMode: '' }
+  style = { visibility: '', opacity: '', mixBlendMode: '', transform: '', clipPath: '' }
+  videoWidth = 1920
+  videoHeight = 1080
+  parentElement = { style: {}, parentElement: { append() {} } }
   playbackRate = 1
   preservesPitch = false
   readyState = 4
@@ -28,19 +32,32 @@ class Media extends EventTarget {
   async play() { this.paused = false }
 }
 class Image extends Media {
+  autoLoad = true
+  currentSrc = ''
   complete = true
+  override get src() { return super.src }
+  override set src(value: string) {
+    super.src = value
+    if (this.autoLoad) this.currentSrc = value
+  }
+  videoWidth = 0
+  videoHeight = 0
   naturalWidth = 1920
+  naturalHeight = 1080
 }
 const clip = (id: string, startMs: number): TimelineClip => ({ id, startMs, inMs: 100, outMs: 1100, source: { nodeId: id, assetVersionId: id }, volume: 1, fadeInMs: 0, fadeOutMs: 0 })
 
-function setup(kind: 'video' | 'audio' | 'image' = 'video', readyState = 4) {
+function setup(kind: 'video' | 'audio' | 'image' = 'video', readyState = 4, stored: Partial<MediaSize> = { width: 1920, height: 1080 }) {
   vi.useFakeTimers()
   const frames = new Map<number, FrameRequestCallback>()
   let frameId = 0
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
   const audios: Media[] = []
-  vi.stubGlobal('document', { createElement: () => { const media = new Media(); audios.push(media); return media } })
+  vi.stubGlobal('document', { createElement: (kind: string) => {
+    if (kind === 'div') return { className: '', append(element: Media) { element.parentElement = this as unknown as Media['parentElement'] }, style: {}, remove() {} }
+    const media = new Media(); audios.push(media); return media
+  } })
   let position = 0
   let playing = false
   const listeners = new Set<() => void>()
@@ -53,25 +70,95 @@ function setup(kind: 'video' | 'audio' | 'image' = 'video', readyState = 4) {
     play: () => { playing = true; emit() }, pause: () => { playing = false; emit() }, seek: (ms: number) => { position = ms; emit() },
   }
   const doc: TimelineDoc = { version: 1, tracks: [{ id: 'track', kind: kind === 'audio' ? 'audio' : 'video', muted: false, volume: 1, clips: [clip('a', 0), clip('b', 1000)] }] }
-  const parts = { draft: { doc }, clock, host: { nodes: [], assetUrl: (id: string) => `/assets/${id}` } } as unknown as EditorPartProps
+  const parts = { output: { width: 1920, height: 1080 }, draft: { doc }, clock, host: { nodes: [], assetUrl: (id: string) => `/assets/${id}` } } as unknown as EditorPartProps & { output: MediaSize }
   const videos = [new Media(), new Media()]
-  videos.forEach(video => { video.readyState = readyState })
+  videos.forEach(video => { video.readyState = readyState; if (!readyState) { video.videoWidth = 0; video.videoHeight = 0 } })
   const image = new Image()
   const changed = vi.fn()
   const imageB = new Image()
-  const player = createMediaPlayer(videos as unknown as HTMLVideoElement[], [image, imageB] as unknown as HTMLImageElement[], () => parts, changed, () => kind)
+  const sized = vi.fn()
+  const player = createMediaPlayer(videos as unknown as HTMLVideoElement[], [image, imageB] as unknown as HTMLImageElement[], () => parts, changed, () => ({ kind, ...stored }), sized)
   const step = (ms: number) => {
     position = ms
     const pending = [...frames.values()]
     frames.clear()
     pending.forEach(callback => callback(ms))
   }
-  return { frames, clock, videos, audios, image, imageB, changed, parts, player, step }
+  return { sized, frames, clock, videos, audios, image, imageB, changed, parts, player, step }
 }
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('Timeline media player', () => {
+  it('hides a reused image with stale natural dimensions through preload and promotion until its assigned source loads', () => {
+    const { parts, image, imageB, clock, player, sized } = setup('image')
+    image.autoLoad = false
+    parts.draft.doc.tracks[0]!.clips.push(clip('c', 2000))
+    clock.seek(1000)
+    expect(imageB.style.visibility).toBe('visible')
+    expect(image.src).toBe('/assets/c')
+    expect(image.currentSrc).toBe('/assets/a')
+    expect(image.naturalWidth).toBe(1920)
+    expect(image.style.visibility).toBe('hidden')
+    clock.seek(2000)
+    expect(image.style.visibility).toBe('hidden')
+    image.currentSrc = image.src
+    image.naturalWidth = 1080
+    image.naturalHeight = 1920
+    image.dispatchEvent(new Event('load'))
+    expect(sized).toHaveBeenCalledWith('c', { width: 1080, height: 1920 })
+    expect(image.style.visibility).toBe('visible')
+    expect(image.parentElement.style).toMatchObject({ width: '31.640625%', height: '100%' })
+    player.dispose()
+  })
+
+  it('hides unknown dimensions and prepares a decoded portrait spare before promotion', () => {
+    const { videos, clock, player, sized } = setup('video', 0, {})
+    expect(videos.map(video => video.style.visibility)).toEqual(['hidden', 'hidden'])
+    expect(videos[0]!.style.transform).toBe('')
+    const spare = videos[1]!
+    spare.readyState = 4
+    spare.videoWidth = 1080
+    spare.videoHeight = 1920
+    spare.dispatchEvent(new Event('loadedmetadata'))
+    expect(sized).toHaveBeenCalledWith('b', { width: 1080, height: 1920 })
+    expect(spare.style.visibility).toBe('hidden')
+    expect(spare.parentElement.style).toMatchObject({ width: '31.640625%', height: '100%' })
+    expect(spare.style.transform).toBe('translate(0%, 0%) scale(1, 1)')
+    clock.seek(1000)
+    expect(spare.style.visibility).toBe('visible')
+    expect(spare.parentElement.style).toMatchObject({ width: '31.640625%', height: '100%' })
+    player.dispose()
+  })
+
+  it.each(['video', 'image'] as const)('paints %s crops on paused seeks and rAF before promoting a transformed spare', kind => {
+    const { parts, clock, videos, image, imageB, step, player, changed } = setup(kind)
+    const clips = parts.draft.doc.tracks[0]!.clips
+    clips[0] = { ...clips[0]!, crop: { keys: [
+      { t: 100, value: { x: 0, y: 0, width: 1, height: 1 }, ease: 'linear' },
+      { t: 1100, value: { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, ease: 'hold' },
+    ] } }
+    clips[1] = { ...clips[1]!, crop: { x: 0.25, y: 0.25, width: 0.5, height: 0.5 } }
+    player.update()
+    const [current, spare] = kind === 'video' ? videos : [image, imageB]
+    expect(spare!.style.visibility).toBe('hidden')
+    expect(spare!.style.transform).toBe('translate(-50%, -50%) scale(2, 2)')
+    clock.seek(500)
+    expect(current!.style.transform).toContain('scale(1.3333333333333333, 1.3333333333333333)')
+    clock.play()
+    const notifications = changed.mock.calls.length
+    step(700)
+    expect(current!.style.transform).toContain('scale(1.5384615384615385, 1.5384615384615385)')
+    expect(changed).toHaveBeenCalledTimes(notifications)
+    const promotion = vi.fn()
+    Object.defineProperty(spare!.style, 'visibility', { set(value: string) {
+      if (value === 'visible') promotion(spare!.style.transform)
+    } })
+    step(1000)
+    expect(promotion).toHaveBeenCalledWith('translate(-50%, -50%) scale(2, 2)')
+    player.dispose()
+  })
+
   it('never treats overlay pictures as main video or audio, including after the main track ends', () => {
     const { parts, videos, audios, clock, player, changed } = setup()
     parts.draft.doc.tracks.push({ id: 'overlay', kind: 'overlay', muted: false, volume: 1, clips: [{

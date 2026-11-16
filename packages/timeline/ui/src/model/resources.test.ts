@@ -5,6 +5,19 @@ import { createResources } from './resources'
 afterEach(() => vi.useRealTimers())
 
 describe('editor preview failure cache', () => {
+  it('shares decoded orientation with all readers and keeps it when stored metadata arrives later', async () => {
+    const cache = createResources({ assetInfo: async () => ({ width: 1920, height: 1080, fps: 30 }) } as unknown as TimelineEditorHost)
+    const changed = vi.fn()
+    cache.subscribe(changed)
+    cache.decodedSize('phone', { width: 1080, height: 1920 })
+    await cache.metadata('phone')
+    expect(cache.info.get('phone')).toEqual({ width: 1920, height: 1080, fps: 30 })
+    expect(cache.resolvedInfo('phone')).toEqual({ width: 1080, height: 1920, fps: 30 })
+    const count = changed.mock.calls.length
+    cache.decodedSize('phone', { width: 1080, height: 1920 })
+    expect(changed).toHaveBeenCalledTimes(count)
+  })
+
   it.each([
     { code: 'unavailable', data: { reason: 'media.preview_unavailable' } },
     { data: { code: 'unavailable', reason: 'media.interrupted' } },

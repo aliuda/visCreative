@@ -1,4 +1,4 @@
-import { ScriptDoc, ScriptDocInput, TimelineDoc, clipDurationMs, clipEndMs, toolNameOf, type AssetVersionView, type EntityView, type NodeView, type SpaceEvent, type TextProposal, type TranscriptItem, type WorkMessageView, type BatchView, type JobView, type WorkItemView, type MethodResult } from '@vis/protocol'
+import { ScriptDoc, ScriptDocInput, TimelineDoc, clipDurationMs, clipEndMs, evaluateAnimated, isAnimated, toolNameOf, type AssetVersionView, type EntityView, type NodeView, type SpaceEvent, type TextProposal, type TranscriptItem, type WorkMessageView, type BatchView, type JobView, type WorkItemView, type MethodResult, type TimelineClip } from '@vis/protocol'
 import { mainSlot, previzDoc, scriptDoc, timelineDoc, type EpisodeSnapshot } from './fixtures'
 import { manuscriptCheck } from './manuscript-checks'
 import { authorCheck } from './author-checks'
@@ -29,6 +29,18 @@ export type Evidence = {
   workItems?: { before: WorkItemView[]; after: WorkItemView[] }
   skills?: { before: MethodResult<'skill.libraryList'>; after: MethodResult<'skill.libraryList'> }
   earlierEpisode?: { before: EpisodeSnapshot; after: EpisodeSnapshot }
+}
+
+function overlaySamples(clip: TimelineClip) {
+  const placement = clip.overlay
+  if (!placement) return []
+  // Every segment is monotone; endpoints and in-range keys cover the whole trimmed interval.
+  const times = new Set([clip.inMs, Math.max(clip.inMs, clip.outMs - 1e-6)])
+  for (const value of Object.values(placement)) if (isAnimated(value)) {
+    for (const key of value.keys) if (key.t >= clip.inMs && key.t < clip.outMs) times.add(key.t)
+  }
+  return [...times].map(sourceMs => ({ x: evaluateAnimated(placement.x, sourceMs), y: evaluateAnimated(placement.y, sourceMs),
+    width: evaluateAnimated(placement.width, sourceMs), opacity: evaluateAnimated(placement.opacity, sourceMs) }))
 }
 
 const aliases: Record<string, string> = {
@@ -119,7 +131,7 @@ export function runChecks(ids: string[], e: Evidence): Check[] {
       case 'transparent_overlay': {
         const asset = e.assets?.find(asset => asset.assetVersionId === e.fixtureVars.transparentAssetVersionId)
         const placements = timeline?.tracks.flatMap(track => track.clips.filter(clip => clip.source.nodeId === e.fixtureVars.transparentVideoNodeId || clip.source.assetVersionId === e.fixtureVars.transparentAssetVersionId).map(clip => ({ track, clip }))) ?? []
-        return check(id, TimelineDoc.safeParse(timeline).success && asset?.hasAlpha === true && asset.mime === 'video/webm' && placements.length === 1 && placements.every(({ track, clip }) => track.kind === 'overlay' && !track.hidden && !!clip.overlay && (clip.overlay.opacity ?? 1) > 0 && clipDurationMs(clip) > 0), 'The measured transparent WebM occurs exactly once on a visible overlay track, with visible nonempty placement, never on the main track')
+        return check(id, TimelineDoc.safeParse(timeline).success && asset?.hasAlpha === true && asset.mime === 'video/webm' && placements.length === 1 && placements.every(({ track, clip }) => track.kind === 'overlay' && !track.hidden && !!clip.overlay && overlaySamples(clip).some(placement => placement.opacity > 0) && clipDurationMs(clip) > 0), 'The measured transparent WebM occurs exactly once on a visible overlay track, with visible nonempty placement, never on the main track')
       }
       case 'transparent_timeline_preserved': return check(id, !!oldTimeline && !!timeline && JSON.stringify(timeline.tracks.filter(track => track.kind !== 'overlay')) === JSON.stringify(oldTimeline.tracks.filter(track => track.kind !== 'overlay')) && JSON.stringify(timeline.textTracks) === JSON.stringify(oldTimeline.textTracks), 'Original main media tracks and text tracks remain unchanged')
       case 'transparent_export': {
@@ -269,26 +281,26 @@ export function runChecks(ids: string[], e: Evidence): Check[] {
       case 'logo_overlay': {
         const videoEnd = Math.max(0, ...(timeline?.tracks.find(track => track.kind === 'video')?.clips.map(clipEndMs) ?? []))
         const logos = timeline?.tracks.filter(track => track.kind === 'overlay' && !track.hidden).flatMap(track => track.clips).filter(clip => clip.source.nodeId === e.fixtureVars.logoNodeId) ?? []
-        const ok = logos.length === 1 && logos.every(clip => clip.overlay && clip.startMs === 0 && clipEndMs(clip) >= videoEnd && clip.overlay.x > 0.5 && clip.overlay.y < 0.5 && clip.overlay.width >= 0.08 && clip.overlay.width <= 0.2 && clip.overlay.opacity > 0.5)
+        const ok = logos.length === 1 && logos.every(clip => clip.overlay && clip.startMs === 0 && clipEndMs(clip) >= videoEnd && overlaySamples(clip).every(placement => placement.x > 0.5 && placement.y < 0.5 && placement.width >= 0.08 && placement.width <= 0.2 && placement.opacity > 0.5))
         return check(id, ok, 'One visible logo overlay from 0 to the end of the video, in the top-right quadrant, 8–20% wide')
       }
       case 'sticker_shot2': {
         const shot = timeline?.tracks.find(track => track.kind === 'video')?.clips[1]
         const stickers = timeline?.tracks.filter(track => track.kind === 'overlay' && !track.hidden).flatMap(track => track.clips).filter(clip => clip.source.nodeId === e.fixtureVars.stickerNodeId) ?? []
-        const ok = !!shot && stickers.length === 1 && stickers.every(clip => clip.overlay && Math.abs(clip.startMs - shot.startMs) <= 50 && Math.abs(clipEndMs(clip) - clipEndMs(shot)) <= 50 && clip.fadeInMs === 500 && clip.overlay.y > 0.5 && Math.abs(clip.overlay.x - 0.5) <= 0.15)
+        const ok = !!shot && stickers.length === 1 && stickers.every(clip => clip.overlay && Math.abs(clip.startMs - shot.startMs) <= 50 && Math.abs(clipEndMs(clip) - clipEndMs(shot)) <= 50 && clip.fadeInMs === 500 && overlaySamples(clip).every(placement => placement.y > 0.5 && Math.abs(placement.x - 0.5) <= 0.15))
         return check(id, ok, 'One sticker spanning shot 2 (±50 ms), centred horizontally and below the middle, with a 500 ms fade-in')
       }
       case 'pip_shot3': {
         const shot = timeline?.tracks.find(track => track.kind === 'video')?.clips[0]
         const pips = timeline?.tracks.filter(track => track.kind === 'overlay' && !track.hidden).flatMap(track => track.clips.map(clip => ({ clip, track }))).filter(({ clip }) => clip.source.nodeId === e.fixtureVars.shot3NodeId) ?? []
         const ok = !!shot && pips.length === 1 && pips.every(({ clip, track }) => clip.overlay && Math.abs(clip.startMs - shot.startMs) <= 50 && clipEndMs(clip) <= clipEndMs(shot) + 50 && clipEndMs(clip) - clip.startMs >= 500
-          && clip.overlay.x > 0.5 && clip.overlay.y > 0.5 && clip.overlay.width >= 0.2 && clip.overlay.width <= 0.45 && (track.muted || clip.volume === 0))
+          && overlaySamples(clip).every(placement => placement.x > 0.5 && placement.y > 0.5 && placement.width >= 0.2 && placement.width <= 0.45) && (track.muted || clip.volume === 0))
         return check(id, ok, 'Shot 3 once as a visible, silent overlay video during shot 1 (±50 ms), in the bottom-right quadrant, 20–45% wide')
       }
       case 'logo_half_opacity': {
         const before = oldTimeline?.tracks.filter(track => track.kind === 'overlay').flatMap(track => track.clips)
         const after = timeline?.tracks.filter(track => track.kind === 'overlay').flatMap(track => track.clips)
-        const ok = before?.length === 1 && after?.length === 1 && after[0]!.overlay?.opacity === 0.5
+        const ok = before?.length === 1 && after?.length === 1 && !!after[0]!.overlay && overlaySamples(after[0]!).every(placement => Math.abs(placement.opacity - 0.5) < 1e-9)
           && JSON.stringify({ ...before[0], overlay: { ...before[0]!.overlay, opacity: 0 } }) === JSON.stringify({ ...after[0], overlay: { ...after[0]!.overlay, opacity: 0 } })
         return check(id, ok, 'The single logo clip has opacity 0.5 and every other field unchanged')
       }

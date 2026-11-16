@@ -56,6 +56,8 @@
 
 > Revised by [RFC 0048](0048-agent-native-capabilities.md) (2026-11-12): in `auto`, a `network` request from an Agent's own read-only web search or fetch tool (ACP `fetch` kind) is auto-approved and recorded. Other `network` requests still ask.
 
+> Claude SDK note ([RFC 0026 §8](0026-agent-instructions.md#8-claude-code-implemented-2026-11-15), 2026-11-15): Claude cannot report its actual Bash cwd. Under the outer macOS sandbox, command auto approval remains bounded by the policy; without it on Windows, Bash always reaches shared approval even in auto mode. Read/Glob/Grep are free under Seatbelt and allowed automatically only for canonical workspace/project targets on Windows. File approval entries contain canonical paths rather than file contents, so explicit session grants match the file across edits. SDK host ask rules ensure native shortcuts cannot bypass these checks.
+
 ### 3. 对话排版
 
 先出样式对比再定，不在 RFC 里拍板。会出三版静态截图（1600×1000，deviceScaleFactor 2），同一段真实对话：

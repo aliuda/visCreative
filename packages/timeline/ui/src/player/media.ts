@@ -2,22 +2,27 @@ import { isAudioTrack, isMainVideoTrack, type TimelineClip } from '@vis/protocol
 import type { EditorPartProps } from '../types'
 import { subscribePlaybackFrames, type AudioClock } from '../player'
 import { activeClip, nextVideoClip, upcomingClips, visualClips } from './model'
+import type { AssetInfo } from '../model/resources'
+import { mediaSize, paintTransform, writeStyle, type MediaSize } from './transform'
 import { alignMedia, playMedia, releaseMedia, type Sound } from './playback'
 
 export function createMediaPlayer(
   initialVideos: readonly HTMLVideoElement[],
   initialImages: readonly HTMLImageElement[],
-  get: () => EditorPartProps,
+  get: () => EditorPartProps & { output: MediaSize },
   onChange: (state: { clipId?: string; audioIds: string[]; loading: boolean; unavailable: boolean }) => void,
-  assetKind: (id: string) => string | undefined,
+  assetInfo: (id: string) => AssetInfo | undefined,
+  onSize?: (id: string, size: MediaSize) => void,
 ) {
   const videos = [...initialVideos]
   const images = [...initialImages]
   const videoSounds = videos.map(element => ({ element }) as Sound)
   const extraElements: (HTMLVideoElement | HTMLImageElement)[] = []
+  const extraContainers: HTMLDivElement[] = []
   const imageListeners: (() => void)[] = []
   const audio = new Map<string, Sound>()
   const assigned = new Map<HTMLVideoElement, string>()
+  const assignedClips = new WeakMap<HTMLVideoElement | HTMLImageElement, TimelineClip>()
   const assignedImages = new Map<HTMLImageElement, string>()
   let loadingTimer: ReturnType<typeof setTimeout> | undefined
   let loadingSince: number | undefined
@@ -25,18 +30,32 @@ export function createMediaPlayer(
   let previousPosition = 0
   let disposed = false
   const isImage = (clip: TimelineClip) => {
-    const kind = assetKind(clip.source.assetVersionId)
+    const kind = assetInfo(clip.source.assetVersionId)?.kind
     if (kind) return kind === 'image'
     const node = get().host.nodes.find(node => node.nodeId === clip.source.nodeId)
     return node?.kind === 'image' || node?.slots.some(slot => slot.content.type === 'asset' && slot.content.assetVersionId === clip.source.assetVersionId && slot.content.mime.startsWith('image/'))
   }
   const listen = (element: EventTarget, events: string[]) => {
-    const changed = () => tick()
+    const changed = () => {
+      const media = element as HTMLVideoElement | HTMLImageElement
+      const clip = assignedClips.get(media)
+      const size = mediaSize(media)
+      if (clip && size) onSize?.(clip.source.assetVersionId, size)
+      tick()
+    }
     events.forEach(event => element.addEventListener(event, changed))
     return () => events.forEach(event => element.removeEventListener(event, changed))
   }
   const listenMedia = (entry: Sound) => {
     entry.unlisten = listen(entry.element, ['loadedmetadata', 'loadeddata', 'seeked', 'canplay', 'error'])
+  }
+  const appendPicture = (element: HTMLVideoElement | HTMLImageElement, initial: HTMLElement) => {
+    const container = document.createElement('div')
+    container.className = 'vis-tl-picture'
+    container.append(element)
+    initial.parentElement?.parentElement?.append(container)
+    extraElements.push(element)
+    extraContainers.push(container)
   }
   const prepareVideo = (clip: TimelineClip, preferred: number) => {
     const element = videos.find(video => assigned.get(video) === clip.id) ?? videos[preferred]!
@@ -52,15 +71,19 @@ export function createMediaPlayer(
       }
       entry.signature = undefined
     }
+    assignedClips.set(element, clip)
     return element
   }
   const tick = (force = false) => {
     if (disposed) return
-    const { draft, clock, host } = get()
+    const { draft, clock, host, output } = get()
     const position = clock.now()
     force ||= Math.abs(position - previousPosition) > 250
     previousPosition = position
     const videoTrack = draft.doc.tracks.find(isMainVideoTrack)
+    const paint = (element: HTMLVideoElement | HTMLImageElement, clip: TimelineClip, at: number) => {
+      return element.parentElement ? paintTransform(element.parentElement, element, clip, at, output, mediaSize(element, assetInfo(clip.source.assetVersionId))) : false
+    }
     const current = activeClip(videoTrack, position)
     const next = nextVideoClip(videoTrack, position)
     const visible = visualClips(videoTrack, position)
@@ -71,20 +94,18 @@ export function createMediaPlayer(
       element.playsInline = true
       element.preload = 'auto'
       element.style.visibility = 'hidden'
-      initialVideos[0]!.parentElement?.append(element)
+      appendPicture(element, initialVideos[0]!)
       const entry: Sound = { element }
       listenMedia(entry)
       videos.push(element)
       videoSounds.push(entry)
-      extraElements.push(element)
     }
     if (visible.filter(item => isImage(item.clip)).length === images.length && next && isImage(next) && images.length === initialImages.length) {
       const element = document.createElement('img')
       element.alt = ''
       element.style.visibility = 'hidden'
-      initialImages[0]!.parentElement?.append(element)
+      appendPicture(element, initialImages[0]!)
       images.push(element)
-      extraElements.push(element)
       imageListeners.push(listen(element, ['load', 'error']))
     }
     const activeVideos = new Map<HTMLVideoElement, typeof visible[number]>()
@@ -93,6 +114,7 @@ export function createMediaPlayer(
       if (isImage(item.clip)) {
         const image = images.find(image => assignedImages.get(image) === item.clip.id) ?? images.find(image => !activeImages.has(image))!
         assignedImages.set(image, item.clip.id)
+        assignedClips.set(image, item.clip)
         const src = host.assetUrl(item.clip.source.assetVersionId)
         if (image.getAttribute('src') !== src) image.src = src
         activeImages.set(image, item)
@@ -106,29 +128,34 @@ export function createMediaPlayer(
       const spare = videos.findIndex(video => !activeVideos.has(video))
       const pending = prepareVideo(next, spare)
       if (!activeVideos.has(pending)) {
+        paint(pending, next, next.startMs)
         pending.pause()
         alignMedia(videoSounds.find(entry => entry.element === pending)!, next, next.startMs)
       }
     }
     for (const entry of videoSounds) {
       const item = activeVideos.get(entry.element as HTMLVideoElement)
-      entry.element.style.visibility = item ? 'visible' : 'hidden'
-      entry.element.style.opacity = String(item?.opacity ?? 0)
-      entry.element.style.mixBlendMode = item?.blend ? 'plus-lighter' : 'normal'
+      const known = item && paint(entry.element as HTMLVideoElement, item.clip, position)
+      writeStyle(entry.element.style, 'visibility', known ? 'visible' : 'hidden')
+      writeStyle(entry.element.style, 'opacity', String(item?.opacity ?? 0))
+      if (entry.element.parentElement) writeStyle(entry.element.parentElement.style, 'mixBlendMode', item?.blend ? 'plus-lighter' : 'normal')
       if (item && videoTrack) playMedia(entry, item.clip, videoTrack, position, clock as AudioClock, force)
       else entry.element.pause()
     }
     if (next && isImage(next) && activeImages.size < images.length) {
       const image = images.find(image => !activeImages.has(image))!
       assignedImages.set(image, next.id)
+      assignedClips.set(image, next)
       const src = host.assetUrl(next.source.assetVersionId)
       if (image.getAttribute('src') !== src) image.src = src
+      paint(image, next, next.startMs)
     }
     for (const image of images) {
       const item = activeImages.get(image)
-      image.style.visibility = item ? 'visible' : 'hidden'
-      image.style.opacity = String(item?.opacity ?? 0)
-      image.style.mixBlendMode = item?.blend ? 'plus-lighter' : 'normal'
+      const known = item && paint(image, item.clip, position)
+      writeStyle(image.style, 'visibility', known ? 'visible' : 'hidden')
+      writeStyle(image.style, 'opacity', String(item?.opacity ?? 0))
+      if (image.parentElement) writeStyle(image.parentElement.style, 'mixBlendMode', item?.blend ? 'plus-lighter' : 'normal')
     }
     const sounding = upcomingClips(draft.doc, position).filter(({ track }) => isAudioTrack(track))
     const keep = new Set(sounding.map(({ clip }) => clip.id))
@@ -192,6 +219,7 @@ export function createMediaPlayer(
       for (const entry of [...videoSounds, ...audio.values()]) releaseMedia(entry)
       images.forEach(image => image.removeAttribute('src'))
       extraElements.forEach(element => element.remove())
+      extraContainers.forEach(element => element.remove())
     },
   }
 }

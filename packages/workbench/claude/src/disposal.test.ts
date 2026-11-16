@@ -1,7 +1,7 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mkdtempSync, rmSync } from 'node:fs'
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { openSpaceDb, spaceSchema as s } from '@vis/storage'
 import { createSessionService, killTree } from '@vis/workbench-core'
@@ -33,6 +33,7 @@ it('termination and concurrent disposal wait for the delayed consumer to record 
   const events: string[] = []
   const runtime = createClaudeRuntime({ db, report: event => { if (event.type === 'turn_ended') events.push(event.status) } }, {
     query, workDir: () => join(tmpdir(), 'vis-delayed-claude'), cliBinDir: tmpdir(), socketPath: 'unused',
+    visMcp: { command: 'vis', args: ['mcp'] },
     issueToken: () => ({ token: 'fake', tokenHash: 'fake' }),
     env: { CLAUDE_CONFIG_DIR: configDir },
   })
@@ -73,6 +74,7 @@ it('disposal waits for an already-finishing consumer whose tree kill is delayed'
     })(), { interrupt: async () => {} }) as ReturnType<QueryFn>
   }
   const runtime = createClaudeRuntime({ db, report: event => { if (event.type === 'turn_ended') events.push(event.status) } }, {
+    visMcp: { command: 'vis', args: ['mcp'] },
     query, workDir: () => tmpdir(), cliBinDir: tmpdir(), socketPath: 'unused', issueToken: () => ({ token: 'fake', tokenHash: 'fake' }),
     env: { CLAUDE_CONFIG_DIR: configDir },
   })
@@ -92,4 +94,66 @@ it('disposal waits for an already-finishing consumer whose tree kill is delayed'
   expect(db.select().from(s.agentInstances).get()?.status).toBe('exited')
   sessions.dispose()
   db.$client.close()
+})
+
+
+it.each(['starting', 'active'])('disposal stops a %s turn before delayed catalog cleanup finishes', async phase => {
+  const db = openSpaceDb(':memory:')
+  const core = await vi.importActual<typeof import('@vis/workbench-core')>('@vis/workbench-core')
+  let release!: () => void, turnAborted!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const aborted = new Promise<void>(resolve => { turnAborted = resolve })
+  let catalogChild: ReturnType<NonNullable<Options['spawnClaudeCodeProcess']>> | undefined
+  let turnChild: typeof catalogChild
+  let sawTurnAbort = false
+  vi.mocked(killTree).mockImplementation(async (child, signal) => {
+    if (catalogChild && child.stdin === catalogChild.stdin) await held
+    await core.killTree(child, signal)
+  })
+  const query: QueryFn = ({ prompt, options }) => {
+    const child = options!.spawnClaudeCodeProcess!({ command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], env: {}, signal: options!.abortController!.signal })
+    if (typeof prompt !== 'string') {
+      catalogChild = child
+      return Object.assign((async function* () {})(), { supportedModels: () => new Promise(() => {}), close: () => {} }) as ReturnType<QueryFn>
+    }
+    turnChild = child
+    options!.abortController!.signal.addEventListener('abort', () => { sawTurnAbort = true; turnAborted() }, { once: true })
+    return (async function* () {
+      if (phase === 'active') yield { type: 'system', subtype: 'init', session_id: 'fake', uuid: 'init' } as unknown as SDKMessage
+      await aborted
+      throw new Error('interrupted turn')
+    })() as ReturnType<QueryFn>
+  }
+  const runtime = createClaudeRuntime({ db, report: () => {} }, {
+    visMcp: { command: 'vis', args: ['mcp'] },
+    query, workDir: () => tmpdir(), cliBinDir: tmpdir(), socketPath: 'unused', issueToken: () => ({ token: 'fake', tokenHash: 'fake' }),
+    env: { CLAUDE_CONFIG_DIR: configDir },
+  })
+  const sessions = createSessionService({ db, runtime })
+  const session = sessions.create({ requestId: 'session' })
+  const dispatch = runtime.dispatchTurn({ sessionId: session.sessionId, turnId: 'turn', sessionTitle: 'Test', titleSource: 'user', text: 'Hold', refs: [], inputSnapshotId: 'snapshot', resumeId: null })
+  const dispatched = dispatch.catch(error => error)
+  try {
+    await expect.poll(() => turnChild !== undefined).toBe(true)
+    if (phase === 'active') await dispatch
+    const catalog = runtime.agentOptions('claude', {}).catch(error => error)
+    await expect.poll(() => catalogChild !== undefined).toBe(true)
+    let disposed = false
+    const disposal = runtime.dispose().then(() => { disposed = true })
+    try {
+      await expect.poll(() => sawTurnAbort).toBe(true)
+      await expect.poll(() => turnChild!.exitCode !== null || turnChild!.signalCode !== null).toBe(true)
+      expect(disposed).toBe(false)
+    } finally { release(); await disposal }
+    expect(await catalog).toMatchObject({ code: 'unavailable' })
+    await dispatched
+    expect(db.select().from(s.agentInstances).get()?.exitReason).toBe('interrupted')
+  } finally {
+    release()
+    await runtime.dispose()
+    await dispatched
+    vi.mocked(killTree).mockImplementation(core.killTree)
+    sessions.dispose()
+    db.$client.close()
+  }
 })

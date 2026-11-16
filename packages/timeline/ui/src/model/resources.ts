@@ -8,6 +8,7 @@ export function createResources(host: TimelineEditorHost) {
   let version = 0
   const listeners = new Set<() => void>()
   const info = new Map<string, AssetInfo>()
+  const decoded = new Map<string, { width: number; height: number }>()
   const previews = new Map<string, MediaPreview>()
   const pending = new Map<string, Promise<void>>()
   const errors = new Map<string, unknown>()
@@ -24,6 +25,16 @@ export function createResources(host: TimelineEditorHost) {
   }
   return {
     host, users: 0, info, previews, errors,
+    resolvedInfo(id: string): AssetInfo | undefined {
+      const stored = info.get(id)
+      const size = decoded.get(id)
+      return size ? { ...stored, ...size } : stored
+    },
+    decodedSize(id: string, size: { width: number; height: number }) {
+      const previous = decoded.get(id) ?? info.get(id)
+      decoded.set(id, size)
+      if (previous?.width !== size.width || previous.height !== size.height) emit()
+    },
     version: () => version,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     metadata(id: string): Promise<void> {

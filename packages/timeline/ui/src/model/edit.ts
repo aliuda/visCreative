@@ -1,4 +1,4 @@
-import { TimelineDoc, TIMELINE_LIMITS, clipDurationMs, clipEndMs, imageMaxMs, isAudioTrack, isMainVideoTrack, isOverlayTrack, sourceTimeAt, type OverlayPlacement, type TimelineClip, type TimelineTrack, type TimelineTransition } from '@vis/protocol'
+import { TimelineDoc, TIMELINE_LIMITS, clipDurationMs, clipEndMs, imageMaxMs, isAudioTrack, isMainVideoTrack, isOverlayTrack, sourceTimeAt, type Animated, type CropRect, type OverlayPlacement, type TimelineClip, type TimelineTrack, type TimelineTransition } from '@vis/protocol'
 
 export type EditReason = 'overlap' | 'limit' | 'missing' | 'invalid' | 'kind' | 'duration' | 'captions'
 export type EditResult = { ok: true; doc: TimelineDoc; value?: number; boundHit?: boolean } | { ok: false; reason: EditReason }
@@ -11,7 +11,7 @@ function sameClip(a: TimelineClip, b: TimelineClip) {
   return a.id === b.id && a.source.nodeId === b.source.nodeId && a.source.assetVersionId === b.source.assetVersionId &&
     a.startMs === b.startMs && a.inMs === b.inMs && a.outMs === b.outMs && a.volume === b.volume && a.fadeInMs === b.fadeInMs && a.fadeOutMs === b.fadeOutMs &&
     (a.speed ?? 1) === (b.speed ?? 1) && a.transitionIn?.kind === b.transitionIn?.kind && a.transitionIn?.durationMs === b.transitionIn?.durationMs &&
-    sameValue(a.overlay, b.overlay)
+    sameValue(a.overlay, b.overlay) && sameValue(a.crop, b.crop)
 }
 
 export function sameDocument(a: TimelineDoc, b: TimelineDoc): boolean {
@@ -351,7 +351,7 @@ export function reorderOverlayTrack(doc: TimelineDoc, id: string, overlayIndex: 
   return finish(next)
 }
 
-export function updateClip(doc: TimelineDoc, id: string, patch: { volume?: number; fadeInMs?: number; fadeOutMs?: number; overlay?: OverlayPlacement }): EditResult {
+export function updateClip(doc: TimelineDoc, id: string, patch: { volume?: number; fadeInMs?: number; fadeOutMs?: number; overlay?: OverlayPlacement; crop?: Animated<CropRect> | null }): EditResult {
   const next = copy(doc)
   const entry = find(next, id)
   if (!entry) return { ok: false, reason: 'missing' }
@@ -359,6 +359,11 @@ export function updateClip(doc: TimelineDoc, id: string, patch: { volume?: numbe
   if (patch.overlay !== undefined) {
     if (!isOverlayTrack(entry.track)) return { ok: false, reason: 'kind' }
     clip.overlay = structuredClone(patch.overlay)
+  }
+  if (patch.crop !== undefined) {
+    if (isAudioTrack(entry.track)) return { ok: false, reason: 'kind' }
+    if (patch.crop === null) delete clip.crop
+    else clip.crop = structuredClone(patch.crop)
   }
   if (patch.volume !== undefined) clip.volume = clamp(patch.volume, 0, 2)
   if (patch.fadeInMs !== undefined) clip.fadeInMs = Math.round(clamp(patch.fadeInMs, 0, Math.min(10_000, clipDurationMs(clip) - clip.fadeOutMs)))

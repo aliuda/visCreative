@@ -1,5 +1,68 @@
 # UI lessons
 
+## A crop edit must retain the lock that permitted it
+
+- **Symptom:** a Free resize enters a preset's tolerance and the next resize becomes constrained; rejected refits change the selected lock; unresolved media constrains crop mode as if the source were square.
+- **Cause:** the editor kept deriving defaults after author edits, stored choices before knowing the edit result, and supplied placeholder dimensions to preset matching.
+- **Instead:** derive defaults until an accepted explicit choice or an accepted crop geometry edit with known media dimensions, then store that edit's lock by clip id and prune it on removal. Key add/remove and ease changes never register locks; an accepted reset clears them. Capture whether dimensions are known as well as the lock and constraint at gesture start, and never store a lock from an unknown-size gesture even if metadata resolves before release. Store only after acceptance and use resolved metadata consistently across Inspector and crop mode. Keep layout placeholders out of aspect constraints. Check requested keyboard-axis permissions before clamping; hold capped drag axes in the preview and report a wholly capped gesture once. Read numeric notice counters through the latest ref in a stable refusal callback, so a producer retained before selection changes reports into the current context. Derive missing-notice restoration from clip presence and discard the expired notice after commit without a state update during render; ignore text-field shortcuts that the timeline does not handle.
+- **Found in:** [RFC 0050 final follow-up](../rfc/0050-clip-transforms.md#step-cd-final-follow-up-2026-11-15), `CropEditor.tsx`, `TransformInspector.tsx` and `overlay/OverlayLayer.tsx`.
+
+## Crop layout assertions must wait for the source frame size
+
+- **Symptom:** the full-frame crop browser test reads a zero-width source frame while its move handle already spans the source.
+- **Cause:** ResizeObserver publishes the crop container size after mount; separate immediate bounding-box reads can straddle that update.
+- **Instead:** poll for non-zero source dimensions and compare both handle dimensions with the current source frame in the same poll, retaining the original tolerance.
+- **Found in:** [RFC 0050 step d](../rfc/0050-clip-transforms.md#step-d-implementation-2026-11-15), `timeline-keyframes.e2e.ts`.
+
+## Playback paints must preserve user-action state
+
+- **Symptom:** the first crop edit changes Output to Free, a refusal disappears on the next frame, or a successful key edit erases another timeline notice.
+- **Cause:** derived document defaults were reused as editor state, and independent producers painted the same status without ownership.
+- **Instead:** derive the default lock from the current crop's source-pixel aspect until an accepted explicit choice or crop geometry edit with known dimensions stores the active lock, and prune stored locks when the clip disappears. Keep commit messages until the next crop action, clock navigation, their blocking state changes or playback reaches an editable position, and attach an owner to notices that can be cleared by more than one control. After gesture start, suppress small minor-axis drift only when the dominant axis is at least twice as large; near diagonals move both axes. Derive notice visibility from document content and selection so a save acknowledgement cannot erase fresh feedback. Advance explicit numeric context counters on content/selection changes and let a stable refusal callback read their latest ref; avoid memoized identity tokens and state updates during render, and keep documents out of notices. Missing-clip feedback survives removal until pointerdown, an editing key outside text fields (including undo/redo), selection change or restoration of that clip; focus and assistive navigation preserve it, and a second removal cannot revive it. Return placement refusals from the shared edit helper; selecting a capped overlay remains possible without reporting a refused edit.
+- **Found in:** [RFC 0050 second review](../rfc/0050-clip-transforms.md#step-c-second-review-corrections-2026-11-15), `CropEditor.tsx`, `transform-context.tsx`, `OverlayLayer.tsx` and `TimelineArea.tsx`.
+
+## Sampling a gesture does not mean every sampled property was edited
+
+- **Symptom:** a horizontal overlay nudge adds a y key, an unrelated capped axis blocks movement, or moving a crop silently changes its aspect.
+- **Cause:** gesture commits wrote every sampled coordinate, and default lock state was reapplied to existing geometry. Crop-handle permissions also came from a render-time clock read that did not update after a seek.
+- **Instead:** compare at contract precision and key only changed properties; check each moving axis at the same clamped source time used by the write. Preserve existing crop dimensions for movement, derive a matching preset from the existing crop or show Free when none matches, and open an absent crop at the full frame. Paint live limits in a small clock subscriber and recheck them when committing. Retiming refusals must restore the gesture draft before changing selection or playhead.
+- **Found in:** [RFC 0050 step c review](../rfc/0050-clip-transforms.md#step-c-review-corrections-2026-11-15), `overlay/placement.ts`, `CropEditor.tsx` and `KeyLane.tsx`.
+
+## Capture-phase timeline shortcuts run before a key handle
+
+- **Symptom:** pressing Delete on a transform diamond deletes its clip, and Escape in crop mode clears the clip selection before leaving crop mode.
+- **Cause:** the timeline registers shortcuts on the window in capture phase. Stopping propagation inside a React handle happens after that listener has already acted.
+- **Instead:** let focused key and crop controls own their unmodified keys in the capture listener, and route crop-mode Escape to the editor before clip-selection handling. Keep undo/redo available. Compare crop as well as placement in document equality: an omitted field silently discards crop-only edits and misidentifies save echoes. Clip media must not share a clipping wrapper with crop handles; let the source frame's controls extend beyond its edges.
+- **Found in:** [RFC 0050 step c](../rfc/0050-clip-transforms.md#step-c-implementation-2026-11-15), `TimelineArea.tsx`, `model/edit.ts` and `CropEditor.tsx`.
+
+## A keyed gesture must distinguish selection from an edit
+
+- **Symptom:** clicking an animated overlay adds a key, or Delete immediately after retiming a diamond deletes the selected clip.
+- **Cause:** a static gesture could safely commit its unchanged value on pointer-up, but an animated edit inserts a key at the playhead even when the sampled value is unchanged. Retiming also changes the React key of the diamond and removes the focused element.
+- **Instead:** commit overlay pointer gestures only after movement, and preserve the selected key's focus across its time change before the next keyboard event. Cover both an unchanged document after selection and focus after retiming in the browser.
+- **Found in:** [RFC 0050 step c](../rfc/0050-clip-transforms.md#step-c-implementation-2026-11-15), `overlay/OverlayLayer.tsx`, `KeyLane.tsx` and `timeline-keyframes.e2e.ts`.
+
+## A reused image keeps the previous source's natural size until load
+
+- **Symptom:** a newly assigned image appears briefly stretched, and placement presets disagree with a rotated preview despite correct decoded video dimensions.
+- **Cause:** `naturalWidth`/`naturalHeight` alone do not establish which image is decoded. Separately, keeping decoded dimensions only in Preview leaves Inspector and output-setting calculations on stored orientation.
+- **Instead:** require a complete image whose `currentSrc` matches its assigned `src` before using its dimensions, including preloaded slots. Keep decoded dimensions per immutable asset version in the editor resource cache, and let Preview, Inspector, presets and output settings read the same resolved metadata. Report empty numeric fields as invalid and explicitly restore document values after rejected or no-op commits.
+- **Found in:** [RFC 0050 second step b review](../rfc/0050-clip-transforms.md#second-step-b-review-corrections-2026-11-15), `model/resources.ts`, `player/transform.ts` and `Inspector.tsx`.
+
+## A reused preview element cannot retain the implicit output frame
+
+- **Symptom:** after the third clip, a timeline whose first image has no stored dimensions changes its main-picture fit while overlays keep the original output frame; phone video can also appear stretched before metadata arrives.
+- **Cause:** deriving output from whichever alternating element still contains the first source loses that size when the element is reused. Stored video dimensions can be pre-rotation, and per-dimension fallbacks can combine unrelated orientations or invent a square while decoding is pending.
+- **Instead:** let Preview retain the first source's decoded dimensions and pass one resolved output to all players. Prefer the complete decoded pair, then a complete stored pair; hide media until one exists, repaint on readiness (including hidden spares), and keep overlay controls positioned independently of media readiness. Cache static paints and millisecond animation samples, rounding down so a hold boundary cannot be skipped.
+- **Found in:** [RFC 0050 step b review](../rfc/0050-clip-transforms.md#step-b-review-corrections-2026-11-15), `Preview.tsx` and `player/transform.ts`.
+
+## Cropping the overlay slot also clips its editing handles
+
+- **Symptom:** a cropped picture either leaks outside its placement box or loses the outer half of its selection and resize handles.
+- **Cause:** scaling a full source inside the placement requires clipping, but the slot also owns controls that extend beyond its bounds. Applying `overflow: hidden` to that slot clips both.
+- **Instead:** fit the slot from `clipTransformAt` and clip the media itself with a source-relative CSS inset before translating/scaling it. Main-track elements can use dedicated clipping containers because they own no handles. Paint transforms while a preloaded element is hidden and again before making it visible; paused seeks and readiness events need the same mapping as playback.
+- **Found in:** [RFC 0050 step b](../rfc/0050-clip-transforms.md#step-b-implementation-2026-11-15), `player/transform.ts` and `overlay/OverlayLayer.tsx`.
+
 ## A remounted board can disagree with its host's data scope
 
 - **Symptom:** opening the board briefly reads current-project data before loading all projects, or reads both scopes when reopened.

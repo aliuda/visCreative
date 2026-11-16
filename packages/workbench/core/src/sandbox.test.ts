@@ -1,6 +1,6 @@
 import { execFile, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -10,6 +10,8 @@ import { buildSandboxPolicy as buildPolicy, prepareSandbox as prepare } from './
 import { codexDescriptor } from '../../codex/src/descriptor'
 import { deepseekDescriptor } from '../../deepseek/src/descriptor'
 import { claudeDescriptor } from '../../claude/src/descriptor'
+import { minimaxDescriptor, minimaxSandbox } from '../../minimax/src/descriptor'
+import { codebuddyDescriptor, codebuddySandbox } from '../../codebuddy/src/descriptor'
 
 const forbiddenPaths = [codexDescriptor, deepseekDescriptor, claudeDescriptor].flatMap(agent => [...agent.forbiddenPaths])
 const prepareSandbox: typeof prepare = options => prepare({ ...options, agent: { ...(options.agent ?? codexSandbox), forbiddenPaths } })
@@ -336,4 +338,123 @@ describe.skipIf(process.platform !== 'darwin')('macOS sandbox enforcement', () =
       if (created) expect(removed.status).toBe(0)
     }
   }, 60_000)
+})
+
+describe('Additional runtime files', () => {
+  const claude = { runtimeDirectory: '.claude', runtimePaths: ['.claude.json', '.claude.json.*'], envPassthrough: [] }
+
+  it.each([
+    ['codex', codexSandbox], ['dsh', deepseekSandbox], ['minimax', minimaxSandbox], ['codebuddy', codebuddySandbox],
+  ] as const)('%s keeps its pre-runtimePaths policy and filtered environment exactly', (_kind, agent) => {
+    const paths = fixture()
+    const allPrivate = [codexDescriptor, deepseekDescriptor, claudeDescriptor, minimaxDescriptor, codebuddyDescriptor].flatMap(descriptor => descriptor.forbiddenPaths)
+    const result = prepare({ ...paths, agent: { ...agent, forbiddenPaths: allPrivate }, platform: 'darwin', available: () => true, env: { HOME: paths.home, PATH: '/usr/bin', ...Object.fromEntries(agent.envPassthrough.map(key => [key, 'fake'])), VIS_AGENT_TOKEN: 'fake', GH_TOKEN: 'fake' } })
+    const normalize = (value: string) => value.replaceAll(JSON.stringify(paths.root).slice(1, -1), '<root>').replaceAll(paths.root, '<root>').replaceAll('\\\\', '/').replaceAll('\\', '/').replace(/"[A-Za-z]:\/Library/g, '"/Library')
+    expect({ ...result, env: Object.fromEntries(Object.entries(result.env).map(([key, value]) => [key, value === undefined ? value : normalize(value)])), policy: normalize(result.policy!) }).toMatchSnapshot()
+    expect(result.policy).toContain(JSON.stringify(join(paths.home, '.claude')))
+    expect(result.policy).toContain(JSON.stringify(join(paths.home, '.claude.json')))
+    expect(result.policy).toContain('(regex #"/[.]claude[.]json[.][^/]*$")')
+  })
+
+  it('exempts only Claude own files and grants existing and future backup writes', () => {
+    const paths = fixture()
+    writeFileSync(join(paths.home, '.claude.json.backup'), 'fake')
+    const result = prepareSandbox({ ...paths, agent: claude, platform: 'darwin', available: () => true, env: { HOME: paths.home, VIS_AGENT_TOKEN: 'fake' } })
+    expect(result.policy).toBeDefined()
+    const denied = result.policy!.split('\n').find(line => line.startsWith('(deny file-read*'))!
+    for (const path of ['.codex', '.dsh']) expect(denied).toContain(JSON.stringify(join(paths.home, path)))
+    for (const path of ['.claude', '.claude.json']) expect(denied).not.toContain(JSON.stringify(join(paths.home, path)))
+    const allowed = result.policy!.split('\n').at(-1)!
+    for (const path of ['.claude', '.claude.json', '.claude.json.backup']) expect(allowed).toContain(JSON.stringify(join(paths.home, path)))
+    expect(allowed).toContain('/[.]claude[.]json[.][^/]*$")')
+    expect(result.env.VIS_AGENT_TOKEN).toBeUndefined()
+  })
+
+  it('canonicalizes runtime file aliases and rejects aliases into protected paths', () => {
+    const paths = fixture()
+    const target = join(paths.root, 'own-runtime')
+    mkdirSync(target)
+    symlinkSync(target, join(paths.home, '.claude.json.alias'), 'junction')
+    const options = { ...paths, agent: claude, platform: 'darwin' as const, available: () => true, env: { HOME: paths.home } }
+    const allowed = prepareSandbox(options)
+    expect(allowed.policy).toContain(`(literal ${JSON.stringify(target)})`)
+    const protectedTarget = join(paths.home, '.codex')
+    mkdirSync(protectedTarget)
+    symlinkSync(protectedTarget, join(paths.home, '.claude.json.protected'), 'junction')
+    expect(prepareSandbox(options).policy).toBeUndefined()
+  })
+
+  it.runIf(process.platform === 'darwin')('macOS: Claude runtime writes succeed while secrets and other homes remain denied', () => {
+    const paths = fixture()
+    const home = join(paths.home, 'john.doe+test[bracket]^$')
+    mkdirSync(home)
+    const protectedFiles = ['.codex/auth.json', '.dsh/config', 'Library/Keychains/fake', '.ssh/fake'].map(path => join(home, path))
+    protectedFiles.push(join(paths.dataDir, 'run/token'), join(paths.dataDir, 'providers.json'), join(paths.dataDir, 'app.db-wal'), join(paths.dataDir, 'spaces/other/space.db'))
+    for (const path of protectedFiles) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'fake') }
+    const result = prepareSandbox({ ...paths, agent: claude, env: { HOME: home } })
+    expect(result.policy).toBeDefined()
+    const own = ['.claude/state', '.claude.json', '.claude.json.future'].map(path => join(home, path))
+    const script = `const fs = require('node:fs'); const assert = require('node:assert/strict'); for (const path of ${JSON.stringify(own)}) fs.writeFileSync(path, 'fake'); for (const path of ${JSON.stringify(protectedFiles)}) assert.throws(() => fs.readFileSync(path), error => ['EPERM', 'EACCES'].includes(error.code)); for (const path of ${JSON.stringify([join(home, 'outside'), join(home, '.codex/.claude.json.future')])}) assert.throws(() => fs.writeFileSync(path, 'fake'))`
+    const probe = spawnSync('/usr/bin/sandbox-exec', ['-p', result.policy!, process.execPath, '-e', script], { cwd: paths.cwd, env: result.env, encoding: 'utf8', timeout: 5000 })
+    expect(probe.error).toBeUndefined()
+    expect(probe.status, probe.stderr).toBe(0)
+  })
+})
+
+describe('Application-owned Claude runtime', () => {
+  const agent = { runtimeDirectory: 'agents/claude', runtimeHomeVariable: 'CLAUDE_CONFIG_DIR', dataRuntimeDirectory: 'agents/claude' as const, envPassthrough: [], forbiddenPaths }
+
+  it('permits only the declared data runtime, creates it privately and protects the real Claude configuration', () => {
+    const paths = fixture()
+    const own = join(paths.dataDir, 'agents/claude')
+    const result = prepare({ ...paths, agent, platform: 'darwin', available: () => true, env: { HOME: paths.home, CLAUDE_CONFIG_DIR: own } })
+    expect(result.policy).toBeDefined()
+    expect(result.env.CLAUDE_CONFIG_DIR).toBe(own)
+    if (process.platform !== 'win32') expect(statSync(own).mode & 0o777).toBe(0o700)
+    const denied = result.policy!.split('\n').find(line => line.startsWith('(deny file-read*'))!
+    for (const path of ['.claude', '.claude.json', '.codex', '.dsh']) expect(denied).toContain(JSON.stringify(join(paths.home, path)))
+    expect(denied).toContain('/[.]claude[.]json[.][^/]*$')
+    const allowed = result.policy!.split('\n').at(-1)!
+    expect(allowed).toContain(`(subpath ${JSON.stringify(own)})`)
+    expect(allowed).not.toContain(`(subpath ${JSON.stringify(paths.dataDir)})`)
+    expect(allowed).not.toContain(JSON.stringify(join(paths.home, '.claude')))
+  })
+
+  it.each(['run', 'spaces', 'outside', 'dangling'] as const)('rejects a runtime symlink pointing into %s', target => {
+    const paths = fixture()
+    const location = target === 'outside' || target === 'dangling' ? join(paths.root, target) : join(paths.dataDir, target)
+    if (target !== 'dangling') mkdirSync(location, { recursive: true })
+    mkdirSync(join(paths.dataDir, 'agents'))
+    const own = join(paths.dataDir, 'agents/claude')
+    symlinkSync(location, own, 'junction')
+    for (const platform of ['darwin', 'win32'] as const) {
+      const result = prepare({ ...paths, agent, platform, available: () => true, env: { HOME: paths.home, CLAUDE_CONFIG_DIR: own } })
+      expect(result.policy).toBeUndefined()
+      expect(result.notice).toBeTruthy()
+    }
+  })
+
+  it('rejects parent symlinks and alternate runtime locations', () => {
+    const paths = fixture()
+    mkdirSync(join(paths.root, 'outside'))
+    symlinkSync(join(paths.root, 'outside'), join(paths.dataDir, 'agents'), 'junction')
+    const result = prepare({ ...paths, agent, platform: 'darwin', available: () => true, env: { HOME: paths.home, CLAUDE_CONFIG_DIR: join(paths.dataDir, 'agents/claude') } })
+    expect(result.policy).toBeUndefined()
+    rmSync(join(paths.dataDir, 'agents'))
+    for (const own of [join(paths.dataDir, 'run'), join(paths.dataDir, 'spaces'), join(paths.home, '.claude'), join(paths.dataDir, 'other')]) {
+      expect(prepare({ ...paths, agent, platform: 'darwin', available: () => true, env: { HOME: paths.home, CLAUDE_CONFIG_DIR: own } }).policy).toBeUndefined()
+    }
+  })
+
+  it.runIf(process.platform === 'darwin')('macOS allows owned runtime writes while denying real configuration, application secrets and other data writes', () => {
+    const paths = fixture()
+    const own = join(paths.dataDir, 'agents/claude')
+    const denied = [join(paths.home, '.claude/settings.json'), join(paths.home, '.claude.json'), join(paths.home, '.claude.json.backup'), join(paths.home, '.codex/auth.json'), join(paths.dataDir, 'run/token'), join(paths.dataDir, 'providers.json'), join(paths.dataDir, 'app.db'), join(paths.dataDir, 'spaces/other/space.db')]
+    for (const path of denied) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'fake') }
+    const result = prepare({ ...paths, agent, env: { HOME: paths.home, CLAUDE_CONFIG_DIR: own } })
+    const script = `const fs = require('node:fs'); const assert = require('node:assert/strict'); fs.writeFileSync(${JSON.stringify(join(own, 'settings.json'))}, 'fake'); for (const path of ${JSON.stringify(denied)}) assert.throws(() => fs.readFileSync(path), error => ['EACCES', 'EPERM'].includes(error.code)); for (const path of ${JSON.stringify([join(paths.home, '.claude/settings.json'), join(paths.dataDir, 'outside')])}) assert.throws(() => fs.writeFileSync(path, 'fake'))`
+    const probe = spawnSync('/usr/bin/sandbox-exec', ['-p', result.policy!, process.execPath, '-e', script], { cwd: paths.cwd, env: result.env, encoding: 'utf8', timeout: 5000 })
+    expect(probe.error).toBeUndefined()
+    expect(probe.status, probe.stderr).toBe(0)
+  })
 })

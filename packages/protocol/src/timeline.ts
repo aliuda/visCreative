@@ -14,6 +14,7 @@ export const TIMELINE_LIMITS = {
   overlayClipsPerTrack: 50,
   /** Overlay width as a fraction of the output width */
   overlayMinWidth: 0.02,
+  transformKeys: 32,
   // 0024d: for example one subtitle track and one title track
   textTracks: 2,
   clipsPerTrack: 200,
@@ -45,17 +46,76 @@ const Color = z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'color must be #RRGGBB')
 const Decimals = (min: number, max: number, places: number) => z.number().min(min).max(max)
   .refine(n => Math.abs(n * 10 ** places - Math.round(n * 10 ** places)) < 1e-9, { message: `at most ${places} decimals` })
 
+export const TransformEase = z.enum(['linear', 'easeInOut', 'hold'])
+export type TransformEase = z.infer<typeof TransformEase>
+type AnimatedKeys<T> = { keys: { t: number; value: T; ease: TransformEase }[] }
+export type Animated<T> = T | AnimatedKeys<T>
+
+export function isAnimated<T>(value: Animated<T> | undefined): value is AnimatedKeys<T> {
+  return typeof value === 'object' && value !== null && 'keys' in value
+}
+
+/** Source-time keys survive trimming and speed changes; a static value stays plain. */
+export const Animated = <T extends z.ZodType>(value: T) => z.union([
+  value,
+  z.strictObject({ keys: z.array(z.strictObject({ t: Ms, value, ease: TransformEase })).min(2).max(TIMELINE_LIMITS.transformKeys) })
+    .superRefine(({ keys }, ctx) => {
+      keys.forEach((key, index) => {
+        if (index && key.t <= keys[index - 1]!.t) ctx.addIssue({ code: 'custom', path: ['keys', index, 't'], message: 'keyframe times must increase strictly' })
+      })
+    }),
+])
+
+export const CropRect = z.strictObject({
+  x: Decimals(0, 1, 3), y: Decimals(0, 1, 3),
+  width: Decimals(0.05, 1, 3), height: Decimals(0.05, 1, 3),
+}).superRefine((rect, ctx) => {
+  if (rect.x + rect.width > 1 + 1e-9) ctx.addIssue({ code: 'custom', path: ['width'], message: 'crop rect must lie inside the frame' })
+  if (rect.y + rect.height > 1 + 1e-9) ctx.addIssue({ code: 'custom', path: ['height'], message: 'crop rect must lie inside the frame' })
+})
+export type CropRect = z.infer<typeof CropRect>
+export const FULL_CROP: CropRect = Object.freeze({ x: 0, y: 0, width: 1, height: 1 })
+
+const Crop = Animated(CropRect).superRefine((crop, ctx) => {
+  if (!isAnimated(crop)) return
+  const aspects = crop.keys.map(key => key.value.width / key.value.height)
+  if (Math.max(...aspects) / Math.min(...aspects) > 1.005 + 1e-9) {
+    ctx.addIssue({ code: 'custom', path: ['keys'], message: 'crop keys must keep one aspect ratio' })
+  }
+})
+
+/** The earlier key shapes its segment; outside the key range the endpoint holds. */
+export function evaluateAnimated<T extends number | CropRect>(value: Animated<T>, sourceMs: number): T {
+  if (!isAnimated(value)) return value as T
+  const keys = value.keys
+  const first = keys[0]!
+  if (sourceMs <= first.t) return first.value
+  for (let index = 1; index < keys.length; index++) {
+    const to = keys[index]!
+    if (sourceMs >= to.t) continue
+    const from = keys[index - 1]!
+    const fraction = (sourceMs - from.t) / (to.t - from.t)
+    const progress = from.ease === 'hold' ? 0 : from.ease === 'easeInOut' ? fraction * fraction * (3 - 2 * fraction) : fraction
+    if (typeof from.value === 'number' && typeof to.value === 'number') return (from.value + (to.value - from.value) * progress) as T
+    const a = from.value as CropRect
+    const b = to.value as CropRect
+    return { x: a.x + (b.x - a.x) * progress, y: a.y + (b.y - a.y) * progress,
+      width: a.width + (b.width - a.width) * progress, height: a.height + (b.height - a.height) * progress } as T
+  }
+  return keys.at(-1)!.value
+}
+
 /**
  * 0024e: where an overlay clip sits. Fractions of the output frame, so a 4K logo and a 512 px logo
  * behave the same; the height follows the source aspect ratio, so overlays are never stretched.
  */
 export const OverlayPlacement = z.strictObject({
   // Centre of the overlay; it may extend past the frame edge and is cropped there
-  x: Decimals(0, 1, 3),
-  y: Decimals(0, 1, 3),
+  x: Animated(Decimals(0, 1, 3)),
+  y: Animated(Decimals(0, 1, 3)),
   // Width as a fraction of the output width
-  width: Decimals(TIMELINE_LIMITS.overlayMinWidth, 1, 3),
-  opacity: Decimals(0, 1, 2),
+  width: Animated(Decimals(TIMELINE_LIMITS.overlayMinWidth, 1, 3)),
+  opacity: Animated(Decimals(0, 1, 2)),
 })
 export type OverlayPlacement = z.infer<typeof OverlayPlacement>
 
@@ -86,6 +146,7 @@ export const TimelineClip = z.strictObject({
   transitionIn: TimelineTransition.optional(),
   // 0024e: required on overlay tracks, rejected elsewhere. On overlay clips the fades above also fade the picture.
   overlay: OverlayPlacement.optional(),
+  crop: Crop.optional(),
 }).superRefine((c, ctx) => {
   if (c.outMs <= c.inMs) ctx.addIssue({ code: 'custom', path: ['outMs'], message: 'outMs must be greater than inMs' })
   else if (c.fadeInMs + c.fadeOutMs > clipDurationMs(c)) ctx.addIssue({ code: 'custom', path: ['fadeOutMs'], message: 'fades must fit inside the clip' })
@@ -234,14 +295,17 @@ export function overlayTracks(doc: Pick<TimelineDoc, 'tracks'>): TimelineTrack[]
   return doc.tracks.filter(track => isOverlayTrack(track) && !track.hidden && track.clips.length > 0)
 }
 
-/** Picture opacity of an overlay clip at a timeline position: its opacity times its linear fades; 0 outside the clip */
-export function overlayOpacityAt(clip: TimelineClip, timelineMs: number): number {
+/**
+ * Picture opacity times its linear fades; 0 outside the clip. A caller that already sampled placement
+ * can reuse that value, or pass 1 to obtain the fade factor without evaluating the opacity curve.
+ */
+export function overlayOpacityAt(clip: Pick<TimelineClip, 'overlay' | 'startMs' | 'inMs' | 'outMs' | 'speed' | 'fadeInMs' | 'fadeOutMs'>, timelineMs: number, sampledOpacity?: number): number {
   const local = timelineMs - clip.startMs
   const length = clipDurationMs(clip)
   if (!clip.overlay || local < 0 || local >= length) return 0
   const fadeIn = clip.fadeInMs ? Math.min(1, local / clip.fadeInMs) : 1
   const fadeOut = clip.fadeOutMs ? Math.min(1, (length - local) / clip.fadeOutMs) : 1
-  return clip.overlay.opacity * fadeIn * fadeOut
+  return (sampledOpacity ?? evaluateAnimated(clip.overlay.opacity, sourceTimeAt(clip, timelineMs))) * fadeIn * fadeOut
 }
 
 /**
@@ -249,11 +313,25 @@ export function overlayOpacityAt(clip: TimelineClip, timelineMs: number): number
  * x / y are the top-left corner and may be negative or past the frame when the overlay is cropped.
  * Export scales to exactly this size; the preview uses the same numbers as percentages.
  */
-export function overlayRect(placement: OverlayPlacement, sourceAspect: number, output: Pick<TimelineOutput, 'width' | 'height'>) {
+export function overlayRect(placement: OverlayPlacement, sourceAspect: number, output: Pick<TimelineOutput, 'width' | 'height'>, sourceMs = 0) {
   const even = (n: number) => Math.max(2, Math.round(n / 2) * 2)
-  const width = even(placement.width * output.width)
+  const width = even(evaluateAnimated(placement.width, sourceMs) * output.width)
   const height = even(width / sourceAspect)
-  return { x: Math.round(placement.x * output.width - width / 2), y: Math.round(placement.y * output.height - height / 2), width, height }
+  return { x: Math.round(evaluateAnimated(placement.x, sourceMs) * output.width - width / 2), y: Math.round(evaluateAnimated(placement.y, sourceMs) * output.height - height / 2), width, height }
+}
+
+/** Crop coordinates use rotated source pixels; rect is the fitted picture in output pixels. */
+export function clipTransformAt(clip: Pick<TimelineClip, 'crop' | 'overlay'>, sourceMs: number,
+  output: Pick<TimelineOutput, 'width' | 'height'>, sourceSize: { width: number; height: number }) {
+  const value = evaluateAnimated(clip.crop ?? FULL_CROP, sourceMs)
+  const crop = { x: value.x * sourceSize.width, y: value.y * sourceSize.height,
+    width: value.width * sourceSize.width, height: value.height * sourceSize.height }
+  const scale = Math.min(output.width / crop.width, output.height / crop.height)
+  const width = crop.width * scale
+  const height = crop.height * scale
+  return { crop, rect: clip.overlay ? overlayRect(clip.overlay, crop.width / crop.height, output, sourceMs)
+    : { x: (output.width - width) / 2, y: (output.height - height) / 2, width, height },
+  opacity: clip.overlay ? evaluateAnimated(clip.overlay.opacity, sourceMs) : 1 }
 }
 
 export function textClipEndMs(clip: Pick<TextClip, 'startMs' | 'durationMs'>): number {
@@ -319,6 +397,7 @@ export const TimelineDoc = z.strictObject({
       unique(clip.id, [...path, 'id'])
       if (overlay && !clip.overlay) ctx.addIssue({ code: 'custom', path: [...path, 'overlay'], message: 'overlay clips need an overlay placement' })
       if (!overlay && clip.overlay) ctx.addIssue({ code: 'custom', path: [...path, 'overlay'], message: 'only overlay clips have an overlay placement' })
+      if (track.kind === 'audio' && clip.crop) ctx.addIssue({ code: 'custom', path: [...path, 'crop'], message: 'audio clips cannot have a crop' })
       const previous = ci === 0 ? undefined : track.clips[ci - 1]!
       const prevEnd = previous ? clipEndMs(previous) : 0
       if (track.kind === 'video') {

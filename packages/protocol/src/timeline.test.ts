@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CanvasOp, NodeView, SlotContent } from './canvas'
-import { BUILTIN_FONT_FAMILIES, BUILTIN_FONTS, ExportOf, TEXT_PRESETS, TIMELINE_LIMITS, TimelineDoc, clipDurationMs, effectiveFades, fontKey, imageMaxMs, isAudioTrack, isMainVideoTrack, isOverlayTrack, overlayOpacityAt, overlayRect, overlayTracks, sourceTimeAt, timelineDurationMs, visibleTextTracks } from './timeline'
+import { BUILTIN_FONT_FAMILIES, BUILTIN_FONTS, CropRect, ExportOf, FULL_CROP, OverlayPlacement, TEXT_PRESETS, TIMELINE_LIMITS, TimelineDoc, TransformEase, clipDurationMs, clipTransformAt, effectiveFades, evaluateAnimated, fontKey, imageMaxMs, isAnimated, isAudioTrack, isMainVideoTrack, isOverlayTrack, overlayOpacityAt, overlayRect, overlayTracks, sourceTimeAt, timelineDurationMs, visibleTextTracks, type Animated } from './timeline'
 
 const clip = (id: string, startMs: number, inMs: number, outMs: number, extra: object = {}) =>
   ({ id, source: { nodeId: `n-${id}`, assetVersionId: `av-${id}` }, startMs, inMs, outMs, volume: 1, fadeInMs: 0, fadeOutMs: 0, ...extra })
@@ -216,5 +216,100 @@ describe('0024e overlay tracks', () => {
     expect(overlayRect({ x: 0.5, y: 0.5, width: 1, opacity: 1 }, 16 / 9, { width: 1280, height: 720 })).toEqual({ x: 0, y: 0, width: 1280, height: 720 })
     const tiny = overlayRect({ x: 0, y: 0, width: 0.02, opacity: 1 }, 10, { width: 64, height: 64 })
     expect(tiny).toMatchObject({ width: 2, height: 2 })
+  })
+})
+
+describe('0050 clip transforms', () => {
+  const key = <T>(t: number, value: T, ease: TransformEase = 'linear') => ({ t, value, ease })
+  const full = { x: 0, y: 0, width: 1, height: 1 }
+  const inset = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 }
+  const document = (crop: unknown, kind = 'video') => ({ version: 1, tracks: [track('v', kind as 'video' | 'audio', [clip('c', 0, 2000, 8000, { crop })])] })
+
+  it('shares the animation guard and immutable whole-frame default across consumers', () => {
+    expect(isAnimated(undefined)).toBe(false)
+    expect(isAnimated(0.5)).toBe(false)
+    expect(isAnimated(FULL_CROP)).toBe(false)
+    expect(isAnimated({ keys: [key(0, 0.2), key(1000, 0.8)] })).toBe(true)
+    expect(FULL_CROP).toEqual({ x: 0, y: 0, width: 1, height: 1 })
+    expect(Object.isFrozen(FULL_CROP)).toBe(true)
+    expect(evaluateAnimated(FULL_CROP, 500)).toBe(FULL_CROP)
+    expect(clipTransformAt({}, 500, { width: 1920, height: 1080 }, { width: 320, height: 240 }).crop).toEqual({ x: 0, y: 0, width: 320, height: 240 })
+  })
+
+  it('keeps static transforms plain and accepts source keys outside the trimmed range', () => {
+    expect(TimelineDoc.parse(document(inset)).tracks[0]!.clips[0]!.crop).toEqual(inset)
+    const crop = { keys: [key(0, full), key(10_000, inset)] }
+    expect(TimelineDoc.parse(document(crop)).tracks[0]!.clips[0]!.crop).toEqual(crop)
+    expect(ok(document({ keys: [key(0, full)] }))).toBe(false)
+    expect(ok(document(inset, 'audio'))).toBe(false)
+    expect(TransformEase.safeParse('bezier').success).toBe(false)
+  })
+
+  it('bounds crop rectangles, precision and aspect variation across every key', () => {
+    for (const value of [{ ...inset, x: 0.3 }, { ...inset, y: 0.3 }, { ...inset, width: 0.049 }, { ...inset, x: 0.1234 }, { ...inset, rotation: 0 }]) {
+      expect(CropRect.safeParse(value).success).toBe(false)
+    }
+    expect(CropRect.safeParse({ x: 0.8, y: 0.8, width: 0.2, height: 0.2 }).success).toBe(true)
+    expect(ok(document({ keys: [key(0, full), key(1000, { ...inset, height: 0.803 })] }))).toBe(true)
+    const bad = TimelineDoc.safeParse(document({ keys: [key(0, full), key(1000, { ...inset, height: 0.81 })] }))
+    expect(bad.success).toBe(false)
+    if (!bad.success) expect(bad.error.issues).toContainEqual(expect.objectContaining({ message: 'crop keys must keep one aspect ratio' }))
+    // The extreme pair must also agree when the first key lies between them.
+    expect(ok(document({ keys: [key(0, full), key(1000, { ...inset, height: 0.797 }), key(2000, { ...inset, height: 0.803 })] }))).toBe(false)
+  })
+
+  it('requires strictly increasing times and two through 32 keys for every property', () => {
+    for (const times of [[1000, 1000], [1000, 0], [-1, 1000], [0.5, 1000]]) {
+      expect(ok(document({ keys: times.map(t => key(t, full)) }))).toBe(false)
+    }
+    for (const property of ['x', 'y', 'width', 'opacity'] as const) {
+      const placement = { x: 0.5, y: 0.5, width: 0.25, opacity: 1 }
+      const keys = Array.from({ length: TIMELINE_LIMITS.transformKeys }, (_, i) => key(i * 100, 0.5))
+      expect(OverlayPlacement.safeParse({ ...placement, [property]: { keys } }).success).toBe(true)
+      expect(OverlayPlacement.safeParse({ ...placement, [property]: { keys: [...keys, key(4000, 0.5)] } }).success).toBe(false)
+      expect(OverlayPlacement.safeParse({ ...placement, [property]: { keys: keys.slice(0, 1) } }).success).toBe(false)
+      expect(OverlayPlacement.safeParse({ ...placement, [property]: { keys: [key(1, 0.5), key(1, 0.6)] } }).success).toBe(false)
+    }
+    const keys = Array.from({ length: 32 }, (_, i) => key(i, full))
+    expect(ok(document({ keys }))).toBe(true)
+    expect(ok(document({ keys: [...keys, key(32, full)] }))).toBe(false)
+  })
+
+  it.each([['linear', 150], ['easeInOut', 131.25], ['hold', 100]] as const)('samples %s with endpoint holds and the earlier key ease', (ease, expected) => {
+    const value = { keys: [key(1000, 100, ease), key(3000, 300, 'hold')] }
+    expect(evaluateAnimated(value, 1500)).toBe(expected)
+    expect(evaluateAnimated(value, -100)).toBe(100)
+    expect(evaluateAnimated(value, 1000)).toBe(100)
+    expect(evaluateAnimated(value, 3000)).toBe(300)
+    expect(evaluateAnimated(value, 9000)).toBe(300)
+    expect(evaluateAnimated(0.25, 9000)).toBe(0.25)
+  })
+
+  it('interpolates all rectangle components without changing the document', () => {
+    const value: Animated<CropRect> = { keys: [key(0, full, 'easeInOut'), key(1000, inset)] }
+    const before = structuredClone(value)
+    expect(evaluateAnimated(value, 250)).toEqual({ x: 0.015625, y: 0.015625, width: 0.96875, height: 0.96875 })
+    expect(value).toEqual(before)
+    expect(evaluateAnimated(inset, 250)).toEqual(inset)
+  })
+
+  it('maps the same content keys through trimming, moving and speed changes', () => {
+    const animated = { keys: [key(0, 0), key(10_000, 1)] }
+    const original = clip('c', 500, 2000, 8000, { speed: 2 })
+    expect(evaluateAnimated(animated, sourceTimeAt(original, 1500))).toBe(0.4)
+    expect(evaluateAnimated(animated, sourceTimeAt({ ...original, startMs: 1500 }, 2500))).toBe(0.4)
+    expect(evaluateAnimated(animated, sourceTimeAt({ ...original, speed: 1 }, 1500))).toBe(0.3)
+  })
+
+  it('returns source-pixel crops and a fitted main picture or independently animated overlay', () => {
+    const crop = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }
+    const output = { width: 1280, height: 720 }
+    const size = { width: 320, height: 240 }
+    expect(clipTransformAt({ crop }, 500, output, size)).toEqual({ crop: { x: 80, y: 60, width: 160, height: 120 }, rect: { x: 160, y: 0, width: 960, height: 720 }, opacity: 1 })
+    const overlay = { x: { keys: [key(0, 0.25), key(1000, 0.75)] }, y: 0.5,
+      width: { keys: [key(0, 0.25), key(1000, 0.5)] }, opacity: { keys: [key(0, 0.25), key(1000, 0.75)] } }
+    expect(clipTransformAt({ crop, overlay }, 500, output, size)).toEqual({ crop: { x: 80, y: 60, width: 160, height: 120 }, rect: { x: 400, y: 180, width: 480, height: 360 }, opacity: 0.5 })
+    const c = { ...clip('c', 500, 1000, 2000), overlay: { ...overlay, opacity: { keys: [key(1000, 0), key(2000, 1)] } } }
+    expect(overlayOpacityAt(c, 1000)).toBe(0.5)
   })
 })

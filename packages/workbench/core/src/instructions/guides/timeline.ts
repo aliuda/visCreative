@@ -25,7 +25,28 @@ Overlay tracks ({ id, kind: 'overlay', muted, volume, clips, optional hidden }) 
 
 Transparent WebM from the render provider keeps alpha on overlay tracks in preview and export. Read the code-render guide and pass transparent: true for motion graphics; use the provider instead of launching Chrome inside the sandbox. Transparent main-track clips composite over black.
 
-Every overlay clip needs overlay: { x, y, width, opacity }. x and y are the overlay's centre as fractions of the output width and height (0–1, three decimals); width is the overlay width as a fraction of the output width (0.02–1); height follows the source aspect ratio; opacity is 0–1 with two decimals. Example, a logo in the top right for the whole film: overlay: { x: 0.9, y: 0.1, width: 0.12, opacity: 1 } with startMs: 0 and outMs equal to the timeline length. On overlay clips fadeInMs and fadeOutMs fade the picture and, for videos, the sound. Overlays stay at absolute times: unlike captions, do not move them when shots move unless the user asks. Other clips must not have an overlay field.
+Every overlay clip needs overlay: { x, y, width, opacity }. x and y are the overlay's centre as fractions of the output width and height (0–1, three decimals); width is the overlay width as a fraction of the output width (0.02–1); height follows the cropped source aspect ratio; opacity is 0–1 with two decimals. Example, a logo in the top right for the whole film: overlay: { x: 0.9, y: 0.1, width: 0.12, opacity: 1 } with startMs: 0 and outMs equal to the timeline length. On overlay clips fadeInMs and fadeOutMs fade the picture and, for videos, the sound. Overlays stay at absolute times: unlike captions, do not move them when shots move unless the user asks. Other clips must not have an overlay field.
+
+## Crop and transform keys
+
+Main-track and overlay video/image clips may have crop: Animated<CropRect>. Audio clips cannot have crop. A CropRect is { x, y, width, height }, fractions of the source frame after rotation, with at most three decimals. x/y are 0–1, width/height are 0.05–1, and x + width and y + height must not exceed 1. Omitted crop means the full source frame. The main track fits the cropped rectangle to the output, preserving aspect and adding bars when the aspects differ. Overlay height follows the cropped aspect.
+
+Animated<T> is either a plain static T or { keys: [{ t, value, ease }, ...] }. crop animates the entire rectangle; overlay x, y, width and opacity animate independently with the same shape and their existing numeric bounds. Write static values plain, never as one key. Each animated property requires 2–32 keys with strictly increasing integer t values. t is a source time in milliseconds, not timeline time: sourceMs = inMs + (timelineMs - startMs) * (speed ?? 1). Images use source times from 0 to outMs. Moving, trimming or changing speed preserves key times; keys outside the current trim are retained and still shape the curve. Values hold before the first key and after the last key.
+
+ease is 'linear', 'easeInOut' (smoothstep) or 'hold'; the earlier key shapes the segment to the next key. All keys of one crop must keep one aspect ratio in source pixels, within 0.5% tolerance; invalid writes report 'crop keys must keep one aspect ratio'. Cropping with a shrinking rectangle expresses a push-in; there is no separate main-track scale field. The 32-key limit applies per property, including keys outside the trim. Invalid writes return the specific validation message and point to this timeline guide; reread the document before correcting a rejected write.
+
+Example: a vertical reframe that pans on a 1920×1080 video. Set doc.output to { width: 720, height: 1280, fps: 30 }. A main-track clip with startMs: 0, inMs: 1000, outMs: 5000 and speed: 2 has this crop (its source keys span two timeline seconds):
+{ keys: [
+  { t: 1000, value: { x: 0.1, y: 0.1, width: 0.243, height: 0.768 }, ease: 'linear' },
+  { t: 5000, value: { x: 0.6, y: 0.1, width: 0.243, height: 0.768 }, ease: 'linear' }
+] }
+
+Example: a slow push-in on a still. A main-track image clip with inMs: 0 and outMs: 10000 (omit speed) has this crop; its aspect stays equal to the source:
+{ keys: [
+  { t: 0, value: { x: 0, y: 0, width: 1, height: 1 }, ease: 'easeInOut' },
+  { t: 10000, value: { x: 0.1, y: 0.1, width: 0.8, height: 0.8 }, ease: 'linear' }
+] }
+These are field examples, not moves applied to new clips. The author's request or author-written skill determines whether to animate and which values to write.
 
 ## Text and fonts
 
@@ -40,5 +61,5 @@ The editor's caption linking applies only to UI edits. When moving, trimming, ch
 
 Export with media_process (media.process), operation: 'timeline.export', params: {}, the timeline nodeId, main slotId and current expectedRevision. Wait with media_get (media.get) or vis media wait. The result's exportOf links the source timeline and revision. Keep source shots, timeline and exported film in the same Frame when useful. Text-only exports have a black background with output settings or the default 1920×1080 at 30 fps.
 
-Rotation, cropping and keyframed motion are unsupported; explain this limit rather than inventing fields. Captions and transitions are authored in the timeline document and rendered by timeline.export, rather than other media.process operations. Describe a result as complete only after processing and inspecting it. If export fails because of the local environment, such as media.captions_unavailable (FFmpeg without the ASS filter), report the error to the user; do not build a substitute export yourself or attach your own file to the export node.
+Rotation, skew, flips, masks and keyframed text or audio are unsupported; explain this limit rather than inventing fields. Captions and transitions are authored in the timeline document and rendered by timeline.export, rather than other media.process operations. Describe a result as complete only after processing and inspecting it. If export fails because of the local environment, such as media.captions_unavailable (FFmpeg without the ASS filter), report the error to the user; do not build a substitute export yourself or attach your own file to the export node.
 `.trim()

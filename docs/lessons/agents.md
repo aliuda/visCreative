@@ -1,11 +1,67 @@
 # Agent lessons
 
+## Redacting every environment value destroys diagnostics
+
+- **Symptom:** Claude startup errors lose `code 1` and paths beneath HOME, making failures difficult to diagnose.
+- **Cause:** replacing all runtime environment values treats flags such as `CLAUDE_CODE_USE_BEDROCK=1`, home paths and PATH as secrets.
+- **Instead:** scrub an explicit list of secret-bearing keys and the agent token, plus only the userinfo segment of proxy URLs. Keep literal, JSON-escaped and URI-encoded secret representations covered without removing ordinary environment values or proxy hosts. Test failures both before and after SDK initialization.
+- **Found in:** [RFC 0026 §8](../rfc/0026-agent-instructions.md#8-claude-code-implemented-2026-11-15), `packages/workbench/claude/src/adapter.ts`.
+
+## Writable agent config can persist into an unsandboxed user CLI
+
+- **Symptom:** a workspace-auto-approved command can modify the user's Claude hooks or MCP configuration and affect a later CLI run outside isolation.
+- **Cause:** the writable runtime home was the same directory the user CLI and studiod authentication loader trusted.
+- **Instead:** import only whitelisted authentication/connection environment from the original user config, then launch expanded Claude with `CLAUDE_CONFIG_DIR=<dataDir>/agents/claude`. Keep real user config read-denied, reject symlinks beneath the owned data path, and restore user config only for restricted fallback without Bash. Resume errors from the former location stay normal failures rather than triggering an unsafe config fallback.
+- **Found in:** [RFC 0026 review correction](../rfc/0026-agent-instructions.md#review-correction-isolated-runtime-configuration-2026-11-15).
+
+## Native permission shortcuts must still reach host checks
+
+- **Symptom:** a safe-command shortcut can avoid the shared approval callback, while Claude provides no reliable shell cwd on Windows.
+- **Cause:** default SDK tool permissions and shared auto-approval are separate decisions.
+- **Instead:** force mapped native tools through host ask rules, allow sandboxed reads there, and check Windows read paths canonically. Block Bash auto approval without Seatbelt. Keep file approval details to canonical paths so content does not enter approval entries and session grants match the file rather than one version of its contents.
+- **Found in:** [RFC 0026 §8](../rfc/0026-agent-instructions.md#8-claude-code-implemented-2026-11-15).
+
+## Claude Keychain OAuth cannot cross the outer sandbox
+
+- **Symptom:** a trivial sandboxed Claude turn fails authentication when no environment authentication is present, even though the same login works outside isolation.
+- **Cause:** the shared profile denies securityd and Keychain access to protect provider keys; granting access to one Keychain item cannot preserve that boundary. S0 passed with settings-environment authentication (exit 0) and failed without it (exit 1, sanitized authentication error).
+- **Instead:** forward only the approved authentication environment after settings override exports. On macOS without a usable token or cloud-authentication flag, preserve restricted unsandboxed tools and surface the environment-authentication notice. Keep full native tools behind isolation and approvals, except the disclosed Windows mode. Replace SDK spawn environments with the filtered turn environment: SDK errors and arguments can contain credentials, so preserve message text while scrubbing only secret-bearing authentication values, proxy URL userinfo and the agent token.
+- **Found in:** [RFC 0026 §8](../rfc/0026-agent-instructions.md#8-claude-code-implemented-2026-11-15).
+
+## Seatbelt write patterns must match only the intended runtime files
+
+- **Symptom:** a backup-name write grant can also match a similarly named file under another agent's directory, while ordinary regex escaping fails to match some home paths in Seatbelt.
+- **Cause:** a suffix regex plus `subpath(home)` also includes descendants, and Seatbelt's operator escaping differs from JavaScript regex escaping.
+- **Instead:** anchor runtime write patterns to the canonical directory, represent literal operators with character classes, and test actual sandbox writes with dots, plus signs, brackets and a caret in a fake home. Keep future backup grants directly in that directory and deny a nested backup path. Preserve existing read-denial policies for other agents exactly.
+- **Found in:** [RFC 0026 §8](../rfc/0026-agent-instructions.md#8-claude-code-implemented-2026-11-15), `packages/workbench/core/src/sandbox.ts`.
+
+## Approval adapters must preserve symlink traversal segments
+
+- **Symptom:** an adapter's workspace auto-approval can accept an outside path containing a symlink followed by `..`.
+- **Cause:** `path.resolve` and `path.join` erase the segments before the shared canonical-path validator can follow the symlink.
+- **Instead:** pass absolute tool paths unchanged, and prepend the working directory to relative paths without normalizing them. Let `auto-approval.ts` resolve each segment. Test both file targets and command working directories through a symlink followed by `..`.
+- **Found in:** [RFC 0015 §2](../rfc/0015-session-experience.md#2-权限模式与自动审批), `packages/workbench/claude/src/adapter.ts`.
+
 ## Claude settings authentication needs an explicit environment fallback
 
 - **Symptom:** Claude asks to log in inside visCreative even though Claude Code already authenticates on its own.
 - **Cause:** `settingSources: []` intentionally excludes user settings, including authentication supplied through the `env` block of `settings.json`.
-- **Instead:** asynchronously reread the user's settings at every turn and forward only string-valued `ANTHROPIC_*` keys plus `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_REGION`, `AWS_PROFILE` and `CLOUD_ML_REGION`, keeping settings sources disabled. Settings values must override exports, including empty or undefined values, to match Claude Code and avoid exported credentials replacing settings credentials paired with a proxy URL. Keep model mappings under `ANTHROPIC_*`, expand `~` in the config directory, treat an empty config directory as unset, and resolve home from source `HOME`, then Windows `USERPROFILE`, then the system home. Ignore read and parse failures silently so credentials never enter errors or logs; tests must use temporary configuration directories.
+- **Instead:** asynchronously reread the user's settings at every turn and forward only string-valued `ANTHROPIC_*` keys plus `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_REGION`, `AWS_PROFILE` and `CLOUD_ML_REGION`, keeping settings sources disabled. On Windows, canonicalize exported authentication key names before applying settings so case differences cannot displace settings values. Settings values must override exports, including empty or undefined values, to match Claude Code and avoid exported credentials replacing settings credentials paired with a proxy URL. Keep model mappings under `ANTHROPIC_*`, expand `~` in the config directory, treat an empty config directory as unset, and resolve home from source `HOME`, then Windows `USERPROFILE`, then the system home. Ignore read and parse failures silently so credentials never enter errors or logs; tests must use temporary configuration directories.
 - **Found in:** [RFC 0026 settings environment authentication](../rfc/0026-agent-instructions.md#implementation-note-settings-environment-authentication-2026-11-15), `packages/workbench/claude/src/adapter.ts`.
+
+## Claude catalog discovery needs open streaming input without a prompt
+
+- **Symptom:** a catalog probe using a string prompt can start model work, while an immediately exhausted stream closes stdin before initialization finishes.
+- **Cause:** SDK control requests share query initialization with the input stream; string input is a user message and an exhausted stream calls `endInput()`.
+- **Instead:** keep an asynchronous input stream open without yielding messages, then release it on abort. Disable session persistence, close and abort the query in `finally`, kill and await the tracked process tree, and remove the temporary working directory. Issue no stored token hash or turn instance for discovery, so even a probe that inherits the turn environment cannot authenticate to the gateway.
+- **Found in:** [RFC 0049 Claude session configuration](../rfc/0049-child-agent-model.md#claude-session-configuration-2026-11-15), `packages/workbench/claude/src/adapter.ts`.
+
+## Catalog fallbacks can become cached validation failures
+
+- **Symptom:** a transient Claude catalog failure leaves effort configuration unavailable for ten minutes, even after authentication is repaired.
+- **Cause:** returning fallback aliases resolves successfully, so the shared gateway caches rows with no efforts and the validator treats them as authoritative. A runtime cache without an authentication key can retain stale provider mappings after that outer cache expires.
+- **Instead:** reject with a sanitized unavailable VisError and keep failures out of both caches. Reread the merged allowlisted authentication environment for each runtime catalog call and use only its hash as the cache key. Keep turn cancellation independent of catalog teardown, and apply synchronous late-spawn guards only to catalog processes; interrupted turn startup must retain its interrupted outcome.
+- **Found in:** [RFC 0049 Claude session configuration](../rfc/0049-child-agent-model.md#claude-session-configuration-2026-11-15), `packages/workbench/claude/src/adapter.ts`.
 
 ## Reference chip numbers must match the vendor's media order
 

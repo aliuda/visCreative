@@ -1,6 +1,7 @@
 import { clipEndMs, overlayTracks, type TimelineClip, type TimelineDoc, type TimelineTrack } from '@vis/protocol'
 import type { EditorPartProps } from '../types'
 import { subscribePlaybackFrames, type AudioClock } from '../player'
+import { mediaSize, type MediaSize } from '../player/transform'
 import { alignMedia, playMedia, releaseMedia, type Sound } from '../player/playback'
 
 export const PREVIEW_OVERLAY_VIDEOS = 1
@@ -18,6 +19,7 @@ export function createOverlayMediaPlayer(
   isVideo: (clip: TimelineClip) => boolean,
   paint: (container: HTMLDivElement, clip: TimelineClip | undefined, visible: boolean, media: HTMLImageElement | HTMLVideoElement) => void,
   onChange: (state: OverlayPreviewState) => void,
+  onSize?: (id: string, size: MediaSize) => void,
 ) {
   const slots: Slot[] = []
   let disposed = false
@@ -30,10 +32,17 @@ export function createOverlayMediaPlayer(
     else { (element as HTMLVideoElement).playsInline = true; (element as HTMLVideoElement).preload = 'auto' }
     container.prepend(element)
     const events = kind === 'image' ? ['load', 'error'] : ['loadedmetadata', 'loadeddata', 'seeked', 'canplay', 'error']
-    const changed = () => tick()
+    const changed = () => {
+      if (slot.clip && onSize) {
+        const size = mediaSize(element)
+        if (size) onSize(slot.clip.source.assetVersionId, size)
+      }
+      tick()
+    }
     events.forEach(event => element.addEventListener(event, changed))
-    return { element, kind, ...(kind === 'video' ? { sound: { element: element as HTMLVideoElement } } : {}),
+    const slot: Slot = { element, kind, ...(kind === 'video' ? { sound: { element: element as HTMLVideoElement } } : {}),
       unlisten: () => events.forEach(event => element.removeEventListener(event, changed)) }
+    return slot
   }
   const release = (slot: Slot, remove = false) => {
     slot.unlisten()
