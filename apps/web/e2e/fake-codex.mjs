@@ -2,7 +2,7 @@
 // Fake `codex app-server` for end-to-end tests: no model calls. Each turn echoes the first user-message line as a streaming reply;
 // Messages containing the slow marker (Unicode U+6162) produce long replies; other probe prefixes run deterministic MCP / CLI scenarios without model calls.
 import { execFile } from 'node:child_process'
-import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 let buffer = ''
@@ -258,6 +258,23 @@ async function readmeShotTurn(turnId, text) {
 
 async function runTurn(turnId, text) {
   if (await readmeShotTurn(turnId, text)) return
+  const viewImages = text.match(/^view-images (.+)$/m)
+  if (viewImages) {
+    const { assetVersionIds, scratch = 0 } = JSON.parse(viewImages[1])
+    const paths = []
+    for (const assetVersionId of assetVersionIds) paths.push((await workTool('asset_get', { assetVersionId })).path)
+    for (let i = 0; i < scratch; i++) {
+      const path = join(process.cwd(), `scratch-${i}.png`)
+      writeFileSync(path, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=', 'base64'))
+      paths.push(path)
+    }
+    for (const [index, path] of paths.entries()) {
+      const item = { type: 'imageView', id: `image-view-${index}`, path }
+      notify('item/started', { threadId: thread, turnId, item, startedAtMs: Date.now() })
+      notify('item/completed', { threadId: thread, turnId, item, completedAtMs: Date.now() })
+    }
+    return replyNow(turnId, 'viewed-images-done')
+  }
   const skillDraft = text.match(/^author-skill-draft (.+)$/m)
   if (skillDraft) {
     await workTool('guide', { topic: 'library' })

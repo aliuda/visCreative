@@ -333,6 +333,7 @@ export function createClaudeRuntime(
 
   async function consume(run: Run, iterator: AsyncIterator<SDKMessage>, first: SDKMessage | undefined) {
     const { sessionId, turnId } = run
+    const readPaths = new Map<string, string>()
     let status: 'completed' | 'failed' | 'interrupted' = 'interrupted'
     try {
       for (let msg = first; msg; ) {
@@ -341,7 +342,7 @@ export function createClaudeRuntime(
         }
         if (msg.type === 'system' && msg.subtype === 'compact_boundary') report({ type: 'context_compacted', sessionId })
         if ((msg.type === 'assistant' || msg.type === 'user') && msg.parent_tool_use_id === null) report({ type: 'leaf', sessionId, leafUuid: msg.uuid! })
-        for (const item of translate(msg)) report({ type: 'item', sessionId, turnId, ...item })
+        for (const item of translate(msg, readPaths)) report({ type: 'item', sessionId, turnId, ...item })
         const next = await iterator.next()
         msg = next.done ? undefined : next.value
       }

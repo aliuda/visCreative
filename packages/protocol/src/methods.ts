@@ -179,6 +179,12 @@ const CORE_METHODS = {
     summary: 'Import a working-directory file as an asset',
     description: 'Registers an image, video or audio file in the current session’s working directory or the project assets directory as a space asset. The path is absolute and stays within those directories after resolving symlinks. File size is limited to 2 GiB. Use canvas.apply to place the returned asset version on the canvas. Requires requestId; identical retries return the first result.',
   },
+  'asset.resolvePaths': {
+    ...asset.resolvePaths,
+    callers: ui,
+    summary: '把 Agent 查看过的图像路径解析为素材',
+    description: '把本机绝对路径映射为本空间的素材版本。路径解析符号链接后须是本空间 blob 目录中的文件，否则（包括文件不存在）返回 null。结果保持输入顺序，不读取也不返回文件内容。',
+  },
   'asset.extractFrames': {
     ...asset.extractFrames,
     callers: both,

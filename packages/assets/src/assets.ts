@@ -29,6 +29,7 @@ export type RegisteredVersion = { assetId: string; assetVersionId: string; versi
 export type AssetVersionRecord = typeof s.assetVersions.$inferSelect & { kind: AssetKind }
 
 export interface AssetStore {
+  readonly blobsDir: string
   stageBytes(data: Uint8Array): Promise<StagedBlob>
   stageFile(sourcePath: string): Promise<StagedBlob>
   registerVersion(tx: SpaceTx, input: RegisterVersionInput): RegisteredVersion
@@ -110,6 +111,7 @@ export function createAssetStore(opts: { blobsDir: string; now?: () => number })
   }
 
   return {
+    blobsDir,
     blobPath,
     stageBytes: data => stage([data]),
     stageFile: sourcePath => stage((async function* () {

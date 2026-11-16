@@ -17,7 +17,7 @@ const MAX_RESULT_CHARS = 4000
 export function translate(phase: 'started' | 'completed', codexTurnId: string, item: any): TranslatedItem[] {
   if (!item || typeof item.id !== 'string') return []
   const base = `cx:${codexTurnId}:${item.id}`
-  const call = (name: string, input: unknown): TranslatedItem => ({ itemId: `${base}:call`, revision: 1, kind: 'tool_call', payload: { toolUseId: item.id, name, input } })
+  const call = (name: string, input: unknown, viewedImages?: { path: string }[]): TranslatedItem => ({ itemId: `${base}:call`, revision: 1, kind: 'tool_call', payload: { toolUseId: item.id, name, input, ...(viewedImages ? { viewedImages } : {}) } })
   const result = (isError: boolean, text: string): TranslatedItem => ({ itemId: `${base}:result`, revision: 1, kind: 'tool_result', payload: { toolUseId: item.id, isError, text: truncate(text), ...(!isError ? toolReceipts(text) : {}) } })
 
   switch (item.type) {
@@ -31,6 +31,12 @@ export function translate(phase: 'started' | 'completed', codexTurnId: string, i
       return phase === 'completed' && typeof item.text === 'string' && item.text.trim()
         ? [{ itemId: base, revision: 1, kind: 'assistant_text', payload: { text: item.text } }]
         : []
+    case 'imageView': {
+      if (typeof item.path !== 'string' || !item.path) return []
+      const items = [call('view_image', { path: item.path }, [{ path: item.path }])]
+      if (phase === 'completed') items.push(result(false, ''))
+      return items
+    }
     case 'mcpToolCall': {
       const items = [call(`${item.server}.${item.tool}`, item.arguments ?? {})]
       if (phase === 'completed') {

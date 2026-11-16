@@ -163,6 +163,9 @@ export function App({ conn, localePreference, onLocaleChange }: { conn: SpaceCon
     [spaceId, conn.token],
   )
   const thumbnailUrl = useCallback((id: string) => posterUrl(id).replace('/poster?', '/thumbnail?'), [posterUrl])
+  const onAssetVersionsChanged = useCallback((listener: (assetIds: readonly string[]) => void) => conn.onEvent?.(event => {
+    if (event.type === 'asset.versionAdded' || event.type === 'asset.updated') listener([event.entityId])
+  }) ?? (() => {}), [conn])
   const scriptSettingsHost = useMemo(() => createScriptSettingsHost(conn, assetUrl), [conn, assetUrl])
   const seriesProjectHost = useMemo(() => createSeriesProjectHost(conn), [conn])
 
@@ -632,6 +635,14 @@ export function App({ conn, localePreference, onLocaleChange }: { conn: SpaceCon
           onImportFiles={attachments.add}
           onRemoveAttachment={attachments.remove}
           resolveAsset={async assetVersionId => conn.rpc.call('asset.get', { assetVersionId })}
+          resolveViewedPaths={paths => conn.rpc.call('asset.resolvePaths', { paths })}
+          onAssetVersionsChanged={onAssetVersionsChanged}
+          locateViewedAsset={assetVersionId => {
+            const node = [...conn.getView().state.nodes.values()].find(node => node.slots.some(slot => slot.content.type === 'asset' && slot.content.assetVersionId === assetVersionId))
+            if (!node) return false
+            work.locateRef(node.nodeId)
+            return true
+          }}
           assetUrl={assetUrl}
           posterUrl={posterUrl}
           onAddAssetRef={attachments.addAsset}

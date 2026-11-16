@@ -1,6 +1,17 @@
 import { expect, it } from 'vitest'
 import { translate } from './translate'
 
+it('translates the native imageView shape at start and completion with an idempotent image call', () => {
+  // Confirmed with codex-cli 0.169.0 app-server generate-ts: v2/ThreadItem.ts has only type, id and path for imageView.
+  const item = { type: 'imageView', id: 'image', path: '/project/blobs/frame.png' }
+  const call = { itemId: 'cx:t:image:call', revision: 1, kind: 'tool_call', payload: { toolUseId: 'image', name: 'view_image', input: { path: item.path }, viewedImages: [{ path: item.path }] } }
+  const completed = [call, { itemId: 'cx:t:image:result', revision: 1, kind: 'tool_result', payload: { toolUseId: 'image', isError: false, text: '' } }]
+  expect(translate('started', 't', item)).toEqual([call])
+  expect(translate('completed', 't', item)).toEqual(completed)
+  expect(translate('completed', 't', item)).toEqual(completed)
+  expect(translate('completed', 't', { type: 'imageView', id: 'missing' })).toEqual([])
+})
+
 it('Completed reasoning prefers summaries, falls back to content for empty summaries, retains fully empty entries, and handles redelivery idempotently', () => {
   const item = { id: 'r', type: 'reasoning', summary: ['一', '二'], content: ['原文'] }
   const expected = [{ itemId: 'cx:t:r', revision: 2, kind: 'reasoning', payload: { text: '一\n\n二' } }]

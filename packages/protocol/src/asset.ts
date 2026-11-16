@@ -125,6 +125,16 @@ export const assetLibrary = {
   },
 } as const
 
+// 0051: frameOf stays unset until frame provenance is stored durably (RFC 0051 follow-ups).
+export const ResolvedAssetPath = z.object({
+  assetId: Id,
+  assetVersionId: Id,
+  kind: z.enum(['image', 'video']),
+  displayName: z.string().optional(),
+  frameOf: z.object({ assetVersionId: Id, displayName: z.string().optional(), atMs: z.int().nonnegative() }).optional(),
+})
+export type ResolvedAssetPath = z.infer<typeof ResolvedAssetPath>
+
 export const asset = {
   get: {
     params: z.object({ assetVersionId: Id }),
@@ -147,6 +157,11 @@ export const asset = {
     }).refine(p => p.count === undefined || p.atMs === undefined, { message: 'count and atMs are mutually exclusive' })
       .transform(p => p.atMs === undefined ? { ...p, count: p.count ?? 6 } : p),
     result: z.object({ durationMs: z.int().nonnegative(), frames: z.array(ExtractedFrameView) }),
+  },
+  // 0051: map local paths an Agent viewed to project asset versions; null for anything that is not a project blob.
+  resolvePaths: {
+    params: z.object({ paths: z.array(z.string().min(1).max(4096)).min(1).max(64) }),
+    result: z.object({ results: z.array(ResolvedAssetPath.nullable()) }),
   },
 } as const
 

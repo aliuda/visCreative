@@ -752,6 +752,27 @@ describe('A single turn', () => {
     expect(instances(sid).map(i => i.status)).toEqual(['exited', 'ready'])
   })
 
+  it('keeps Read image paths across SDK messages within a turn and clears them for the next run', async () => {
+    const sid = newSession()
+    nextQuery = q => q.push(init())
+    const first = send(sid, 'Inspect the image')
+    await sessions.idle()
+    const imageResult = (uuid: string) => ({ type: 'user', uuid, parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'read', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AA==' } }] }] } }) as unknown as SDKMessage
+    calls[0]!.push(assistant('read-call', [{ type: 'tool_use', id: 'read', name: 'Read', input: { file_path: '/project/frame.png' } }]))
+    calls[0]!.push(imageResult('image-result'))
+    calls[0]!.push(result())
+    calls[0]!.push('end')
+    await until(() => turnOf(first.messageId).status === 'completed')
+    expect(sessions.getTranscript({ sessionId: sid }).items.find(item => item.itemId === 'image-result:0')?.payload).toEqual({ toolUseId: 'read', isError: false, text: '[图片]', viewedImages: [{ path: '/project/frame.png' }] })
+    const next = send(sid, 'Continue')
+    await sessions.idle()
+    calls[1]!.push(imageResult('unmatched-result'))
+    calls[1]!.push(result())
+    calls[1]!.push('end')
+    await until(() => turnOf(next.messageId).status === 'completed')
+    expect(sessions.getTranscript({ sessionId: sid }).items.find(item => item.itemId === 'unmatched-result:0')?.payload).not.toHaveProperty('viewedImages')
+  })
+
   it('Insert a notice when context is compacted', async () => {
     const sid = newSession()
     nextQuery = q => q.push(init())

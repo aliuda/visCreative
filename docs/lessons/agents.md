@@ -1,5 +1,12 @@
 # Agent lessons
 
+## JavaScript realpath can erase symlink parent traversal
+
+- **Symptom:** a path containing `link/..` appears to resolve to a registered project blob even though the operating system follows it outside the blob directory.
+- **Cause:** Node's JavaScript `realpathSync` resolves the path lexically before following symlinks, removing the parent segment too early.
+- **Instead:** use `realpathSync.native` for existing blob paths and the blob root, then check the exact canonical hash shard and file name. Test a symlink followed by `..` with an existing outside target as well as ordinary links into and out of the blob directory.
+- **Found in:** [RFC 0051 path resolution](../rfc/0051-viewed-images-in-transcript.md#path-resolution-assetresolvepaths-caller-ui-only), `services/studiod/src/asset-paths.ts`.
+
 ## Redacting every environment value destroys diagnostics
 
 - **Symptom:** Claude startup errors lose `code 1` and paths beneath HOME, making failures difficult to diagnose.

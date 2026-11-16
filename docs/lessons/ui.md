@@ -1,5 +1,12 @@
 # UI lessons
 
+## Transcript variants must survive turn grouping
+
+- **Symptom:** image-view receipts form thumbnail groups in `groupTranscript`, but disappear from the session or break its step renderer.
+- **Cause:** `workTranscript` builds turn blocks from paired calls again; its pair index, step builder and statistics previously handled only the `tools` variant.
+- **Instead:** preserve every paired tool variant through both grouping layers, count image calls in turn statistics, and keep both call and result IDs on the rendered group for history anchoring. Cover the final `workTranscript` output as well as the lower-level grouping helper.
+- **Found in:** [RFC 0051](../rfc/0051-viewed-images-in-transcript.md), `toolGroups.ts`, `workBlocks.ts` and `WorkBlock.tsx`.
+
 ## A crop edit must retain the lock that permitted it
 
 - **Symptom:** a Free resize enters a preset's tolerance and the next resize becomes constrained; rejected refits change the selected lock; unresolved media constrains crop mode as if the source were square.

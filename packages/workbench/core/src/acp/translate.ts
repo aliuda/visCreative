@@ -18,7 +18,12 @@ const MAX_RESULT_CHARS = 4000
 export function createTranslator(acpSessionId: string, turnId: string, itemPrefix: string) {
   let planRevision = 0
   const messages = new Map<string, { text: string; revision: number }>()
+  const toolPaths = new Map<string, string>()
   const base = (id: string) => `${itemPrefix}:${acpSessionId}:${id}`
+  const rememberPath = (update: any) => {
+    const path = [update.rawInput?.path, update.rawInput?.file_path, update.locations?.[0]?.path].find(value => typeof value === 'string' && value)
+    if (path) toolPaths.set(update.toolCallId, path)
+  }
 
   return (update: any): TranslatedItem[] => {
     switch (update?.sessionUpdate) {
@@ -36,21 +41,26 @@ export function createTranslator(acpSessionId: string, turnId: string, itemPrefi
       case 'plan':
         if (!Array.isArray(update.entries)) return []
         return [{ itemId: `${base(turnId)}:plan`, revision: ++planRevision, kind: 'plan', payload: { entries: update.entries.map((entry: any) => ({ text: entry.content, status: entry.status })) } }]
-      case 'tool_call':
+      case 'tool_call': {
+        rememberPath(update)
         return [{
           itemId: `${base(update.toolCallId)}:call`,
           revision: 1,
           kind: 'tool_call',
           payload: { toolUseId: update.toolCallId, name: String(update.title ?? 'tool'), input: update.rawInput ?? {} },
         }]
+      }
       case 'tool_call_update': {
+        if (!toolPaths.has(update.toolCallId)) rememberPath(update)
         if (update.status !== 'completed' && update.status !== 'failed') return []
         const text = contentText(update.content)
+        const path = toolPaths.get(update.toolCallId)
+        const viewedImages = update.status === 'completed' && path && Array.isArray(update.content) && update.content.some((content: any) => (content?.type === 'content' ? content.content : content)?.type === 'image') ? [{ path }] : undefined
         return [{
           itemId: `${base(update.toolCallId)}:result`,
           revision: 1,
           kind: 'tool_result',
-          payload: { toolUseId: update.toolCallId, isError: update.status === 'failed', text: truncate(text), ...(update.status === 'completed' ? toolReceipts(text) : {}) },
+          payload: { toolUseId: update.toolCallId, isError: update.status === 'failed', text: truncate(text), ...(update.status === 'completed' ? toolReceipts(text) : {}), ...(viewedImages ? { viewedImages } : {}) },
         }]
       }
       default:

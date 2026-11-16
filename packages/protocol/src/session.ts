@@ -112,6 +112,14 @@ export const TranscriptItem = z.object({
 })
 export type TranscriptItem = z.infer<typeof TranscriptItem>
 
+// 0051: images whose pixels reached the model through a tool call. Adapters write this on the tool_call payload,
+// or on the tool_result payload when only the result proves the image arrived; the UI reads either side of the pair.
+export const VIEWED_IMAGES_LIMITS = { perCall: 32, pathLength: 4096 } as const
+export const ViewedImage = z.object({ path: z.string().min(1).max(VIEWED_IMAGES_LIMITS.pathLength) })
+export type ViewedImage = z.infer<typeof ViewedImage>
+export const ViewedImages = z.array(ViewedImage).max(VIEWED_IMAGES_LIMITS.perCall)
+export type ViewedImages = z.infer<typeof ViewedImages>
+
 // 0013: payloads for reasoning and plan entries; the UI infers reasoning completion and duration from subsequent entries and turn state.
 export const ReasoningPayload = z.object({ text: z.string() })
 export type ReasoningPayload = z.infer<typeof ReasoningPayload>

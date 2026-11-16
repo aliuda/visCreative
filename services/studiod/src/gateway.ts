@@ -13,6 +13,7 @@ import {
 import { appSchema, type AppDb, appendEvent, currentSeq, eq, inArray, readEventsAfter, spaceSchema as s, workspaceMigrationBoundary } from '@vis/storage'
 import { findAgentInstance, findInstanceTurn, sameSecret, spaceIdOfToken } from './auth'
 import { assetView, extractFrames, importAgentFile, importAsset, listModels } from './media'
+import { resolveAssetPaths } from './asset-paths'
 import { listProjectSkills, pickDirectory, reveal, validateDirectory } from './filesystem'
 import { join } from 'node:path'
 import { statSync } from 'node:fs'
@@ -370,6 +371,7 @@ export function createGateway(deps: GatewayDeps): Gateway {
       if (ctx.caller === 'agent') agentTurn(ctx)
       return assetView(ctx.host, ctx.host.db, p.assetVersionId)
     },
+    'asset.resolvePaths': (p, { host }) => resolveAssetPaths(host, p),
     'font.list': (_p, ctx) => {
       if (ctx.caller === 'agent') agentTurn(ctx)
       return listFonts(ctx.host.db)

@@ -1,6 +1,7 @@
 import { PlanPayload, type TranscriptItem } from '@vis/protocol'
 import { describeError, formatter, messagesFor, type Locale } from '@vis/ui-kit'
 import { sessionMessages } from './messages'
+import { groupTranscript } from './toolGroups'
 
 export function elapsedTime(milliseconds: number, locale: Locale = 'zh-CN'): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000))
@@ -27,6 +28,7 @@ export function activityText(items: TranscriptItem[], turnId: string, locale: Lo
   const m = messagesFor(sessionMessages, locale)
   const current = items.filter(item => item.turnId === turnId)
   if (current.some(item => item.kind === 'approval' && (item.payload as { status?: string })?.status === 'pending')) return m.waitingConfirmation
+  if (groupTranscript(current).some(group => group.kind === 'images' && group.calls.some(pair => pair.call && !pair.result))) return m.viewingImages
   const last = current.findLast(item => item.kind !== 'plan')
   if (last?.kind === 'assistant_text') return m.replying
   if (last?.kind === 'tool_call') {

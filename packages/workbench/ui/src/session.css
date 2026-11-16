@@ -183,6 +183,22 @@
 .vis-tool-call > summary .vis-tool-name { flex-shrink: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vis-tool-preview { min-width: 0; }
 
+.vis-viewed-grid { display: grid; grid-template-columns: repeat(auto-fill, clamp(120px, 30%, 168px)); gap: 8px; padding-block: 6px; }
+.vis-viewed-tile { display: flex; align-items: center; justify-content: center; width: 100%; aspect-ratio: 16 / 10; min-width: 0; padding: 0; overflow: hidden; border: 1px solid var(--vis-node-border); border-radius: 6px; background: var(--vis-bg); color: var(--vis-text-dim); }
+.vis-viewed-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.vis-viewed-placeholder { flex-direction: column; gap: 4px; padding: 8px; }
+.vis-viewed-placeholder > svg { flex: none; }
+.vis-viewed-filename, .vis-viewed-placeholder-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vis-viewed-filename { font-size: 11px; line-height: 14px; }
+.vis-viewed-placeholder-label { font-size: 10px; line-height: 14px; color: var(--vis-text-faint); }
+.vis-viewed-placeholder.is-error { border-color: var(--vis-danger); color: var(--vis-danger); }
+.vis-viewed-placeholder.is-pending { background: linear-gradient(110deg, var(--vis-node) 20%, var(--vis-node-border) 45%, var(--vis-node) 70%); background-size: 200% 100%; animation: vis-viewed-shimmer 1.4s ease-in-out infinite; }
+.vis-viewed-more { font-family: var(--vis-font); }
+.vis-viewed-details { padding-block: 4px; }
+.vis-viewed-details > summary { cursor: pointer; font: 11px var(--vis-font); }
+@keyframes vis-viewed-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .vis-viewed-placeholder.is-pending { animation: none; } }
+
 .vis-approval { border-left: 2px solid var(--vis-warn); padding: 10px 10px 10px 12px; background: color-mix(in srgb, var(--vis-warn) 5%, transparent); border-radius: 0 var(--vis-radius-sm) var(--vis-radius-sm) 0; font-size: 12px; line-height: 1.6; }
 .vis-approval-title { color: var(--vis-warn); font-weight: 600; }
 .vis-approval-summary { margin-top: 4px; overflow-wrap: anywhere; }

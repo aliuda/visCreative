@@ -1,6 +1,7 @@
 import type { JobView, TranscriptItem } from '@vis/protocol'
 import { describe, expect, it } from 'vitest'
 import { generationJob, groupTranscript, transcriptGenerationJobIds } from './toolGroups'
+import { activityText } from './activity'
 
 const item = (itemId: string, kind: TranscriptItem['kind'], payload: unknown = {}): TranscriptItem => ({
   itemId, createdSeq: 1, revision: 1, turnId: 't', kind, payload, createdAt: 0, updatedAt: 0,
@@ -35,6 +36,55 @@ describe('Tool-linked generation jobs', () => {
 })
 
 describe('Tool call grouping', () => {
+  const imageCall = (id: string, paths: string[]) => item(`call-${id}`, 'tool_call', { toolUseId: id, name: 'view_image', viewedImages: paths.map(path => ({ path })) })
+
+  it('shows image-view activity until its result arrives, including parallel tool receipts', () => {
+    const view = imageCall('view', ['/view.png'])
+    expect(activityText([view], 't', 'en')).toBe('Viewing images…')
+    expect(activityText([view, call('other'), result('other')], 't', 'en')).toBe('Viewing images…')
+    expect(activityText([view, result('view')], 't', 'en')).toBe('Thinking…')
+    expect(activityText([view], 'another-turn', 'en')).toBe('Thinking…')
+  })
+
+  it('splits image runs at ordinary calls and messages, preserving path order and deduplicating both sides', () => {
+    const a = imageCall('a', ['/a.png', '/b.png', '/a.png']), ar = result('a')
+    const b = imageCall('b', ['/b.png', '/c.png']), br = result('b')
+    const ordinary = call('ordinary'), ordinaryResult = result('ordinary')
+    const c = imageCall('c', ['/d.png']), cr = result('c')
+    const text = item('text', 'assistant_text'), d = imageCall('d', ['/d.png'])
+    expect(groupTranscript([a, ar, b, br, ordinary, ordinaryResult, c, cr, text, d])).toEqual([
+      { kind: 'images', itemId: a.itemId, calls: [{ call: a, result: ar }, { call: b, result: br }], paths: ['/a.png', '/b.png', '/c.png'] },
+      { kind: 'tools', itemId: ordinary.itemId, calls: [{ call: ordinary, result: ordinaryResult }] },
+      { kind: 'images', itemId: c.itemId, calls: [{ call: c, result: cr }], paths: ['/d.png'] },
+      { kind: 'item', item: text },
+      { kind: 'images', itemId: d.itemId, calls: [{ call: d }], paths: ['/d.png'] },
+    ])
+  })
+
+  it('uses result-side images, including late receipts, and retains image tool job links', () => {
+    const a = call('a'), text = item('text', 'assistant_text')
+    const ar = item('result-a', 'tool_result', { toolUseId: 'a', text: '{"jobId":"image-job"}', viewedImages: [{ path: '/result.png' }] })
+    const b = imageCall('b', ['/both.png'])
+    const br = item('result-b', 'tool_result', { toolUseId: 'b', viewedImages: [{ path: '/both.png' }, { path: '/result.png' }] })
+    expect(groupTranscript([a, b, text, br, ar])).toEqual([
+      { kind: 'images', itemId: a.itemId, calls: [{ call: a, result: ar }, { call: b, result: br }], paths: ['/result.png', '/both.png'] },
+      { kind: 'item', item: text },
+    ])
+    expect(transcriptGenerationJobIds([a, ar])).toEqual(['image-job'])
+  })
+
+  it('ignores invalid viewedImages fields without hiding ordinary calls or a valid opposite side', () => {
+    const invalid = [null, 'image', [{ path: '' }], [{ path: 1 }], [{ path: 'x'.repeat(4097) }], Array.from({ length: 33 }, () => ({ path: '/a.png' }))]
+    for (const viewedImages of invalid) {
+      const a = item('invalid', 'tool_call', { toolUseId: 'invalid', viewedImages })
+      expect(groupTranscript([a])).toEqual([{ kind: 'tools', itemId: a.itemId, calls: [{ call: a }] }])
+      const invalidResult = item('invalid-result', 'tool_result', { toolUseId: 'invalid', viewedImages })
+      expect(groupTranscript([a, invalidResult])).toEqual([{ kind: 'tools', itemId: a.itemId, calls: [{ call: a, result: invalidResult }] }])
+      const result = item('valid-result', 'tool_result', { toolUseId: 'invalid', viewedImages: [{ path: '/valid.png' }] })
+      expect(groupTranscript([a, result])).toEqual([{ kind: 'images', itemId: a.itemId, calls: [{ call: a, result }], paths: ['/valid.png'] }])
+    }
+  })
+
   it('Preserve ordinary messages and empty records', () => {
     const user = item('user', 'user')
     const text = item('text', 'assistant_text')

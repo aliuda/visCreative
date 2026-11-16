@@ -3,7 +3,7 @@ import { SKILL_SOURCE_LIMITS } from './runtime'
 import { METHODS, isMethodName } from './methods'
 import { WorkMessageKind, WorkMessageFrom, WorkFailure, WorkSessionView } from './work'
 import { NodeView } from './canvas'
-import { ApprovalPayload, MessageRef, SessionSummary, TranscriptItem, UserMessagePayload } from './session'
+import { ApprovalPayload, MessageRef, SessionSummary, TranscriptItem, UserMessagePayload, ViewedImages, VIEWED_IMAGES_LIMITS } from './session'
 import { NOTIFICATIONS } from './events'
 import { ErrorData } from './rpc'
 import { MediaTaskView, numberReferences } from './operations'
@@ -516,6 +516,18 @@ describe('protocol', () => {
     if (plain.success) expect(plain.data.versions[0]?.source).not.toHaveProperty('operation')
     expect(parse({ operation: 'image.crop' }).success).toBe(false)
     expect(parse({ operation: 'unknown' }).success).toBe(false)
+  })
+
+  it('bounds viewed images and resolves paths in input order with null for non-assets (RFC 0051)', () => {
+    expect(ViewedImages.parse([{ path: '/p/blobs/ab/abc' }])).toEqual([{ path: '/p/blobs/ab/abc' }])
+    expect(ViewedImages.safeParse([{ path: '' }]).success).toBe(false)
+    expect(ViewedImages.safeParse(Array.from({ length: VIEWED_IMAGES_LIMITS.perCall + 1 }, () => ({ path: '/a.png' }))).success).toBe(false)
+    const resolve = METHODS['asset.resolvePaths']
+    expect(resolve.params.safeParse({ paths: [] }).success).toBe(false)
+    expect(resolve.params.safeParse({ paths: Array.from({ length: 65 }, (_, i) => `/f${i}.png`) }).success).toBe(false)
+    const result = { results: [{ assetId: 'asset_1', assetVersionId: 'av_1', kind: 'image', displayName: 'frame' }, null] }
+    expect(resolve.result.parse(result)).toEqual(result)
+    expect(resolve.result.safeParse({ results: [{ assetVersionId: 'av_1', kind: 'audio' }] }).success).toBe(false)
   })
 
   it('audio reuses media generation, asset and canvas contracts without requiring visual dimensions', () => {

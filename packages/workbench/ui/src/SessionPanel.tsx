@@ -20,7 +20,8 @@ import { statusLabels, reparentTargets } from './work/model'
 import { AgentIcon } from './AgentIcon'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { AgentConfigPicker } from './AgentConfigPicker'
-import { Attachments } from './Attachments'
+import { AttachmentPreview, Attachments } from './Attachments'
+import { useViewedImagePaths, type ViewedImageHost, type ViewedImageResolution } from './ViewedImages'
 import { ATTACHMENT_ACCEPT, type AttachmentDraft } from './attachmentState'
 import { ApprovalModePicker } from './ApprovalModePicker'
 import { anchoredScrollTop } from './history'
@@ -32,7 +33,7 @@ import './session.css'
 export type RefChip = { nodeId: string }
 export type { RefPreview } from './RefThumb'
 
-export type SessionPanelProps = {
+export type SessionPanelProps = ViewedImageHost & {
   sceneProposalHost?: SceneProposalHost
   skillDraftHost?: SkillDraftHost
 
@@ -109,8 +110,10 @@ function readPreference(key: string): string | null {
 }
 
 type ComposerDraft = { pendingAgentConfig: boolean; text: string; onTextChange(text: string | ((previous: string) => string)): void; sending: boolean; onSendingChange(sending: boolean): void }
+const EMPTY_TRANSCRIPT: TranscriptItem[] = []
 
 export function SessionPanel(p: SessionPanelProps) {
+  const viewedPaths = useViewedImagePaths(p.openSessionId, p.transcript ?? EMPTY_TRANSCRIPT, p)
   const panel = useRef<HTMLElement>(null)
   const sm = useMessages(skillCopyMessages)
   const agents = useAgents()
@@ -244,7 +247,7 @@ export function SessionPanel(p: SessionPanelProps) {
         </header>}
         <div className="vis-session-stack">
           {!p.openSessionId && p.workTree ? <WorkTree {...p.workTree} openSessionId={p.openSessionId} view={treeView} onViewChange={setTreeView} /> : null}
-          {p.openSessionId ? activeSession ? <section key={activeSession.sessionId} className={`vis-session-card is-${activeSession.agentKind} is-expanded`}><div className="vis-conversation"><Conversation {...p} pendingAgentConfig={pendingConfig.has(activeSession.sessionId)} session={activeSession} text={text} onTextChange={setText} sending={sending} onSendingChange={setSending} /></div></section> : <div className="vis-session-empty">{m.loading}</div> : null}
+          {p.openSessionId ? activeSession ? <section key={activeSession.sessionId} className={`vis-session-card is-${activeSession.agentKind} is-expanded`}><div className="vis-conversation"><Conversation {...p} viewedPaths={viewedPaths} pendingAgentConfig={pendingConfig.has(activeSession.sessionId)} session={activeSession} text={text} onTextChange={setText} sending={sending} onSendingChange={setSending} /></div></section> : <div className="vis-session-empty">{m.loading}</div> : null}
         </div>
       </div>
       {dialog === 'workspace' && p.projectId ? <WorkspaceDialog projects={p.projects} projectId={p.projectId} onClose={() => setDialog(null)} onCreate={p.onCreate} onPickDirectory={p.onPickDirectory} onValidateDirectory={p.onValidateDirectory} onListSkills={p.onListSkills} /> : null}
@@ -276,13 +279,23 @@ function QueueStatus({ session, archived, blocked, onReopen, onResume, onClear }
   </div>
 }
 
-function Conversation(p: SessionPanelProps & ComposerDraft & { session: SessionSummary }) {
+function Conversation(p: SessionPanelProps & ComposerDraft & { session: SessionSummary; viewedPaths: ReadonlyMap<string, ViewedImageResolution> }) {
   const agents = useAgents()
   const agentsLoaded = useAgentsLoaded()
   const m = useMessages(sessionMessages)
   const { locale } = useLocale()
   const scroller = useRef<HTMLDivElement>(null)
   const composerInput = useRef<HTMLTextAreaElement>(null)
+  const [previewAsset, setPreviewAsset] = useState<AssetVersionView | null>(null)
+  const [previewError, setPreviewError] = useState<unknown>(null)
+  const previewRequest = useRef(0)
+  useEffect(() => () => { previewRequest.current++ }, [])
+  const openViewedAsset = (assetVersionId: string) => {
+    const request = ++previewRequest.current
+    setPreviewError(null)
+    if (p.locateViewedAsset?.(assetVersionId)) return
+    void p.resolveAsset(assetVersionId).then(asset => { if (previewRequest.current === request) setPreviewAsset(asset) }, error => { if (previewRequest.current === request) setPreviewError(error) })
+  }
   useEffect(() => {
     if (p.composerDraft?.sessionId !== p.session.sessionId) return
     const frame = requestAnimationFrame(() => composerInput.current?.focus())
@@ -329,6 +342,7 @@ function Conversation(p: SessionPanelProps & ComposerDraft & { session: SessionS
     const next = items.findIndex(existing => existing.createdAt > item.createdAt)
     items.splice(next < 0 ? items.length : next, 0, item)
   }
+  const latestTurnId = p.session.activeTurnId ?? [...new Set(items.flatMap(item => item.turnId ? [item.turnId] : []))].at(-1)
   const queued = p.workTree?.items.some(item => item.waitingSlotSince !== null && item.sessions.some(session => session.sessionId === p.session.sessionId))
   const archived = p.workTree?.items.some(item => item.sessions.some(session => session.sessionId === p.session.sessionId && session.archived)) ?? false
   const owner = p.workTree?.items.find(item => item.workItemId === p.session.workItemId)
@@ -387,8 +401,9 @@ function Conversation(p: SessionPanelProps & ComposerDraft & { session: SessionS
           {[m.exampleStoryboard, m.exampleVariants, m.exampleOrganize].map(example => <button type="button" key={example} onClick={() => { p.onTextChange(example); composerInput.current?.focus() }}>{example}</button>)}
         </div> : null}
         {historyError ? <span role="alert">{describeError(historyError, locale)}</span> : null}
+        {previewError ? <span role="alert">{describeError(previewError, locale)}</span> : null}
         {groups.map(group => group.kind === 'work'
-          ? <WorkBlock key={group.itemId} block={group} onStop={() => p.onStop(p.session.sessionId)} silentSince={group.active ? p.session.silentSince : null} items={items} jobs={p.generationJobs} onToggle={() => { const el = scroller.current; if (el && stick.current) el.scrollTop = el.scrollHeight }} />
+          ? <WorkBlock key={group.itemId} block={group} expanded={group.active || group.turnId === latestTurnId} viewedImages={{ resolutions: p.viewedPaths, assetUrl: p.assetUrl, onOpenAsset: openViewedAsset }} onStop={() => p.onStop(p.session.sessionId)} silentSince={group.active ? p.session.silentSince : null} items={items} jobs={p.generationJobs} onToggle={() => { const el = scroller.current; if (el && stick.current) el.scrollTop = el.scrollHeight }} />
           : group.kind === 'result'
             ? <GenerationResult key={group.job.jobId} job={group.job} archived={archived} resolveAsset={p.resolveAsset} assetUrl={p.assetUrl} posterUrl={p.posterUrl} onLocateRef={p.onLocateRef} onAddRef={p.onAddRef} onAddAssetRef={p.onAddAssetRef} />
             : group.kind === 'sceneProposal'
@@ -401,6 +416,7 @@ function Conversation(p: SessionPanelProps & ComposerDraft & { session: SessionS
             : <Item canSendNow={!blocked && !queued && (!agentsLoaded || agents.some(agent => agent.kind === p.session.agentKind))} onSendNow={messageId => p.onSendNow(p.session.sessionId, messageId)} stopCancelsWork={p.stopCancelsWork?.has(p.session.sessionId) ?? false} blocked={blocked} agentKind={p.session.agentKind} key={group.item.itemId} item={group.item} streaming={streaming.has(group.item.itemId)} states={p.messageStates} resolveAsset={p.resolveAsset} assetUrl={p.assetUrl} posterUrl={p.posterUrl} resolveRef={p.resolveRef} onLocateRef={p.onLocateRef} />)}
       </div>
       <Composer {...p} inputRef={composerInput} />
+      {previewAsset ? <AttachmentPreview asset={previewAsset} src={p.assetUrl(previewAsset.assetVersionId)} onClose={() => { previewRequest.current++; setPreviewAsset(null) }} /> : null}
     </>
   )
 }

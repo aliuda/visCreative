@@ -15,13 +15,17 @@ const MAX_RESULT_CHARS = 4000
  * Convert SDK messages to transcript entries, using only complete main-Agent messages (excluding streaming fragments and subagents).
  * Entry IDs combine the message uuid and block index, making repeated delivery idempotent.
  */
-export function translate(msg: SDKMessage): TranslatedItem[] {
+export function translate(msg: SDKMessage, readPaths = new Map<string, string>()): TranslatedItem[] {
   if (msg.type === 'assistant' && msg.parent_tool_use_id === null) {
     const items: TranslatedItem[] = []
     msg.message.content.forEach((block, i) => {
       const itemId = `${msg.uuid}:${i}`
       if (block.type === 'text' && block.text.trim()) items.push({ itemId, revision: 1, kind: 'assistant_text', payload: { text: block.text } })
-      if (block.type === 'tool_use') items.push({ itemId, revision: 1, kind: 'tool_call', payload: { toolUseId: block.id, name: block.name, input: block.input } })
+      if (block.type === 'tool_use') {
+        const input = block.input as Record<string, unknown> | null
+        if (block.name === 'Read' && typeof input?.file_path === 'string' && input.file_path) readPaths.set(block.id, input.file_path)
+        items.push({ itemId, revision: 1, kind: 'tool_call', payload: { toolUseId: block.id, name: block.name, input: block.input } })
+      }
     })
     return items
   }
@@ -30,11 +34,13 @@ export function translate(msg: SDKMessage): TranslatedItem[] {
     msg.message.content.forEach((block, i) => {
       if (block.type !== 'tool_result') return
       const text = resultText(block.content)
+      const path = readPaths.get(block.tool_use_id)
+      const viewedImages = !block.is_error && path && Array.isArray(block.content) && block.content.some(content => content.type === 'image') ? [{ path }] : undefined
       items.push({
         itemId: `${msg.uuid}:${i}`,
         revision: 1,
         kind: 'tool_result',
-        payload: { toolUseId: block.tool_use_id, isError: block.is_error ?? false, text: truncate(text), ...(!block.is_error ? toolReceipts(text) : {}) },
+        payload: { toolUseId: block.tool_use_id, isError: block.is_error ?? false, text: truncate(text), ...(!block.is_error ? toolReceipts(text) : {}), ...(viewedImages ? { viewedImages } : {}) },
       })
     })
     return items

@@ -143,6 +143,24 @@ async function agent(token: string) {
   return c
 }
 
+it('allows UI asset path resolution and rejects Agent callers at the method registry boundary', async () => {
+  const c = await ui()
+  let a: Awaited<ReturnType<typeof agent>> | undefined
+  try {
+    await c.call('events.subscribe', { spaceId })
+    const host = studiod.spaces.get(spaceId)!
+    const staged = await host.assets.stageBytes(Buffer.from('image'))
+    const asset = host.assets.registerVersion(host.db, { staged, kind: 'image', mime: 'image/png', origin: 'import' })
+    const paths = [host.assets.blobPath(staged.hash)]
+    expect(await c.call('asset.resolvePaths', { paths })).toEqual({ results: [{ assetId: asset.assetId, assetVersionId: asset.assetVersionId, kind: 'image' }] })
+    const { sessionId } = await c.call('session.create', { requestId: 'resolve-session' })
+    await c.call('session.sendMessage', { requestId: 'resolve-turn', sessionId, text: 'Inspect images', refs: [] })
+    await until(() => dispatched.some(turn => turn.sessionId === sessionId))
+    a = await agent(dispatched.find(turn => turn.sessionId === sessionId)!.token)
+    await expect(a.call('asset.resolvePaths', { paths })).rejects.toMatchObject({ code: 'forbidden', rpc: { data: { reason: 'runtime.caller_forbidden', params: { method: 'asset.resolvePaths', caller: 'agent' } } } })
+  } finally { a?.close(); c.close() }
+})
+
 const until = async (check: () => boolean, ms = 2000) => {
   const deadline = Date.now() + ms
   while (!check()) {

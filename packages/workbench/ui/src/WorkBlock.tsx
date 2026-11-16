@@ -6,17 +6,20 @@ import { activityText, elapsedTime, reasoningActive } from './activity'
 import { sessionMessages } from './messages'
 import { ToolGroup } from './ToolGroup'
 import { workBlockStats, type WorkBlockGroup } from './workBlocks'
+import { ViewedImages, type ViewedImagesProps } from './ViewedImages'
+import { useAutoExpand } from './useAutoExpand'
 
-export function WorkBlock({ block, items, jobs, silentSince, onStop, onToggle }: { block: WorkBlockGroup; items: TranscriptItem[]; jobs?: ReadonlyMap<string, JobView> | undefined; silentSince?: number | null; onStop?(): void; onToggle(): void }) {
+export function WorkBlock({ block, items, jobs, silentSince, onStop, onToggle, viewedImages, expanded }: { block: WorkBlockGroup; items: TranscriptItem[]; jobs?: ReadonlyMap<string, JobView> | undefined; silentSince?: number | null; onStop?(): void; onToggle(): void; viewedImages: ViewedImagesProps; expanded: boolean }) {
   const m = useMessages(sessionMessages)
   const { locale } = useLocale()
   const format = useFormat()
   const now = useClock(block.active)
   const fallbackStart = useRef(Date.now())
+  const disclosure = useAutoExpand(expanded && block.steps.some(step => step.kind === 'images'), onToggle)
   const stats = workBlockStats(block)
   const duration = elapsedTime((block.active ? now : stats.endedAt ?? 0) - (stats.startedAt ?? fallbackStart.current), locale)
-  return <details className={`vis-item vis-work-block${block.active ? ' is-running' : ''}`} data-history-items={JSON.stringify(block.items.map(item => item.itemId))} onToggle={onToggle}>
-    <summary className="vis-work-block-summary">
+  return <details ref={disclosure.ref} className={`vis-item vis-work-block${block.active ? ' is-running' : ''}`} data-history-items={JSON.stringify(block.items.map(item => item.itemId))} onToggle={disclosure.onToggle}>
+    <summary className="vis-work-block-summary" onClick={disclosure.onSummaryClick}>
       {block.active ? <span className="vis-activity-dot" aria-hidden="true" /> : <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>}
       <span className="vis-work-block-label">{block.active ? <><span role="status" className={silentSince != null ? 'vis-turn-silent' : undefined}>{silentSince != null ? m.silentWarning(format.number(Math.max(0, Math.floor((now - silentSince) / 60_000)))) : activityText(items, block.turnId!, locale)}</span><span aria-hidden="true"> · </span><span aria-label={m.turnElapsed} aria-live="off">{duration}</span></> : m.worked(duration)}{stats.tools ? ` · ${m.workTools(format.number(stats.tools))}` : ''}{stats.failed ? <span className="vis-tool-failures"> · {m.failedTools(format.number(stats.failed))}</span> : null}</span>
       {block.active && silentSince != null && onStop ? <button type="button" className="vis-work-block-stop" onClick={event => { event.preventDefault(); event.stopPropagation(); onStop() }}>{m.stop}</button> : null}
@@ -24,6 +27,7 @@ export function WorkBlock({ block, items, jobs, silentSince, onStop, onToggle }:
     </summary>
     <div className="vis-work-block-steps">{block.steps.map(step => step.kind === 'tools'
       ? <ToolGroup key={step.itemId} group={step} jobs={jobs} onToggle={onToggle} />
+      : step.kind === 'images' ? <ViewedImages key={step.itemId} group={step} expanded={expanded} onToggle={onToggle} {...viewedImages} />
       : step.item.kind === 'reasoning' ? <ReasoningBlock key={step.item.itemId} item={step.item} active={block.active && reasoningActive(step.item, items, block.turnId)} />
         : <PlanCard key={step.item.itemId} item={step.item} />)}</div>
   </details>

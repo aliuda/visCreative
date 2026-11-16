@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { METHODS, capabilities, commandOf, describeCapability, listCapabilities, model } from './index'
 
 describe('capabilities', () => {
+  it('keeps viewed-image path resolution UI-only (RFC 0051)', () => {
+    expect(METHODS['asset.resolvePaths'].callers).toEqual(['ui'])
+    expect(listCapabilities('agent').map(capability => capability.method)).not.toContain('asset.resolvePaths')
+    expect(describeCapability('asset.resolvePaths', 'agent')).toBeUndefined()
+    expect(describeCapability('asset.resolvePaths', 'ui')).toBeDefined()
+  })
+
   it('keeps all hosting methods UI-only and refuses agent capability descriptions', () => {
     const ui = listCapabilities('ui').map(capability => capability.method)
     const agent = listCapabilities('agent').map(capability => capability.method)

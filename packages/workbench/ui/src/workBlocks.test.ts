@@ -17,9 +17,28 @@ describe('Work blocks', () => {
     const block = groups[0]!
     expect(block.kind).toBe('work')
     if (block.kind !== 'work') throw new Error('Expected work block')
-    expect(block.steps.map(step => step.kind === 'tools' ? step.calls.map(pair => pair.call?.itemId) : step.item.itemId)).toEqual(['reason', 'plan', ['a', 'b'], 'reason2'])
+    expect(block.steps.map(step => step.kind !== 'item' ? step.calls.map(pair => pair.call?.itemId) : step.item.itemId)).toEqual(['reason', 'plan', ['a', 'b'], 'reason2'])
     expect(workBlockStats(block)).toEqual({ tools: 2, failed: 1, startedAt: 1000, endedAt: 2000 })
     expect(items).toEqual(before)
+  })
+
+  it('preserves image groups through turn blocks, splits ordinary tools, and counts their calls and failures', () => {
+    const first = item('first', 'tool_call', { toolUseId: 'first', viewedImages: [{ path: '/first.png' }] })
+    const second = call('second')
+    const receipt = result('second', { viewedImages: [{ path: '/second.png' }, { path: '/first.png' }] })
+    const failed = item('failed', 'tool_call', { toolUseId: 'failed', viewedImages: [{ path: '/failed.png' }] })
+    const failure = result('failed', { isError: true })
+    const reply = item('reply', 'assistant_text')
+    const groups = workTranscript([first, result('first'), second, receipt, call('ordinary'), result('ordinary'), failed, reply, failure])
+    const block = groups[0]!
+    if (block.kind !== 'work') throw new Error('Expected work block')
+    expect(block.steps).toEqual([
+      { kind: 'images', itemId: 'first', calls: [{ call: first, result: result('first') }, { call: second, result: receipt }], paths: ['/first.png', '/second.png'] },
+      { kind: 'tools', itemId: 'ordinary', calls: [{ call: call('ordinary'), result: result('ordinary') }] },
+      { kind: 'images', itemId: 'failed', calls: [{ call: failed, result: failure }], paths: ['/failed.png'] },
+    ])
+    expect(workBlockStats(block)).toMatchObject({ tools: 4, failed: 1 })
+    expect(groups).toHaveLength(2)
   })
 
   it.each(['assistant_text', 'approval', 'notice', 'user'] as const)('keeps %s outside the blocks and splits both sides', kind => {

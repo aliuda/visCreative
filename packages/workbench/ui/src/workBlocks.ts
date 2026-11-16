@@ -1,5 +1,5 @@
 import type { JobView, SceneProposal, SkillDraftReceipt, TranscriptItem } from '@vis/protocol'
-import { groupTranscript, type ToolCall, type TranscriptGroup } from './toolGroups'
+import { groupTranscript, viewedImagePaths, type ToolCall, type TranscriptGroup } from './toolGroups'
 import { sceneProposalResults } from './SceneProposalCard'
 import { skillDraftResults } from './SkillDraftCard'
 import { generationResults } from './generationResults'
@@ -36,7 +36,7 @@ export function workTranscript(source: TranscriptItem[], jobs?: ReadonlyMap<stri
   const waiting = (item: TranscriptItem) => !!activeTurnId && item.kind === 'user' && isWaiting(item)
   const items = queuedAfterTurn(source, waiting)
   const pairs = new Map<string, ToolCall>()
-  for (const group of groupTranscript(items)) if (group.kind === 'tools') for (const pair of group.calls) {
+  for (const group of groupTranscript(items)) if (group.kind !== 'item') for (const pair of group.calls) {
     pairs.set((pair.call ?? pair.result)!.itemId, pair)
   }
   const results = generationResults(items, jobs)
@@ -57,7 +57,13 @@ export function workTranscript(source: TranscriptItem[], jobs?: ReadonlyMap<stri
         block.items.push(item)
         if (pair) {
           const previous = block.steps.at(-1)
-          if (previous?.kind === 'tools') previous.calls.push(pair)
+          const paths = viewedImagePaths(pair)
+          if (paths !== undefined) {
+            if (previous?.kind === 'images') {
+              previous.calls.push(pair)
+              previous.paths = [...new Set([...previous.paths, ...paths])]
+            } else block.steps.push({ kind: 'images', itemId: item.itemId, calls: [pair], paths })
+          } else if (previous?.kind === 'tools') previous.calls.push(pair)
           else block.steps.push({ kind: 'tools', itemId: item.itemId, calls: [pair] })
         } else if (item.kind !== 'tool_call' && item.kind !== 'tool_result') block.steps.push({ kind: 'item', item })
       }
@@ -99,7 +105,7 @@ export function workTranscript(source: TranscriptItem[], jobs?: ReadonlyMap<stri
 }
 
 export function workBlockStats(block: WorkBlockGroup) {
-  const calls = block.steps.flatMap(step => step.kind === 'tools' ? step.calls : [])
+  const calls = block.steps.flatMap(step => step.kind !== 'item' ? step.calls : [])
   const items = [...block.items, ...calls.flatMap(pair => [pair.call, pair.result].filter((item): item is TranscriptItem => !!item))]
   return {
     tools: calls.length,
