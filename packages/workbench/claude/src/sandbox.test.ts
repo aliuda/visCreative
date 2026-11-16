@@ -23,7 +23,7 @@ const forbiddenPaths = ['~/.codex', '~/.dsh', '~/.claude', '~/.claude.json', '~/
 let launched: { command: string; args: string[]; env: Record<string, string | undefined> }[]
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'vis-claude-sandbox-')))
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), 'vis-claude-sandbox-')))
   const cwd = join(root, 'project/work')
   const home = join(root, 'home')
   mkdirSync(cwd, { recursive: true })
