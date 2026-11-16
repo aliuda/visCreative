@@ -98,7 +98,7 @@ it('resolves a symlink outside the blob directory when its realpath is a registe
   expect(resolveAssetPaths(host, { paths: [link] })).toEqual({ results: [{ assetId: image.assetId, assetVersionId: image.assetVersionId, kind: 'image', displayName: 'Project image' }] })
 })
 
-it('returns null for a symlink followed by parent traversal that only normalizes to a registered blob', async () => {
+it('resolves symlink parent traversal according to the file the operating system opens', async () => {
   const image = await register()
   const hash = host.assets.getVersion(host.db, image.assetVersionId)!.blobHash
   const outside = join(dir, 'outside')
@@ -108,7 +108,11 @@ it('returns null for a symlink followed by parent traversal that only normalizes
   const link = join(host.assets.blobsDir, 'link')
   symlinkSync(join(outside, 'deep'), link, 'junction')
   const traversal = `${link}${sep}..${sep}${hash.slice(0, 2)}${sep}${hash}`
-  expect(resolveAssetPaths(host, { paths: [traversal] })).toEqual({ results: [null] })
+  // Windows normalizes .. before following links, so this path opens the registered blob.
+  const expected = process.platform === 'win32'
+    ? { assetId: image.assetId, assetVersionId: image.assetVersionId, kind: 'image', displayName: 'Project image' }
+    : null
+  expect(resolveAssetPaths(host, { paths: [traversal] })).toEqual({ results: [expected] })
 })
 
 it('returns null for non-visual assets and for a project with no blob directory yet', async () => {
