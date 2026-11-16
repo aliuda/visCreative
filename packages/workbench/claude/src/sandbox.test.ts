@@ -387,7 +387,8 @@ it('scrubs abnormal post-init errors and preserves the message outside credentia
     await expect.poll(() => logged.mock.calls.length).toBe(1)
     const output = JSON.stringify(logged.mock.calls)
     expect(output).toContain('Network failed for [redacted] and [redacted]')
-    expect(output).toContain(`exited with code 1 at ${homePath}`)
+    // output is JSON, so compare the JSON-escaped form (Windows backslashes are doubled).
+    expect(output).toContain(JSON.stringify(`exited with code 1 at ${homePath}`).slice(1, -1))
     expect(output).not.toContain('fake-auth')
     expect(output).not.toContain(options.issueToken().token)
   } finally { logged.mockRestore() }
