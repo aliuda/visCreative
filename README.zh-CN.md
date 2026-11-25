@@ -62,7 +62,7 @@
 | 🎵 **画布上的音频** | 上传音频，在波形节点中播放、拖动进度，或用 Mock 生成音乐与音效。音频沿用图片、视频的版本历史、参考输入和生成流程。 |
 | 🎥 **视频参考** | 用画布片段引导 Seedance 2.0 和已注册的 Seedance 2.5。提示词面板提前显示封面、时长、模型限制与托管状态；媒体托管使用你自己的 TOS 存储桶。 |
 | 📚 **资产库** | 点顶栏的 **资产库** 按类型、分类和标签浏览项目里的素材。你发起后，项目的资产库会话为素材起名、分类、打标签（手改的字段始终优先，每轮整理都能撤销），并建议把同一主体的素材归成设定——人物、场景、物品和风格——经你确认后生效。素材可以直接拖到画布上；在脚本编辑器里可以从资产库选设定入镜。把项目设为系列的一集，就能在各集之间共享设定：每集保留自己固定版本的副本，只在你选择时才更新。 |
-| 🖱️ **像工具一样顺手的画布** | 带模型与参数选择的浮动提示词面板、⊕ 快速延伸、右键菜单、复制/粘贴/创建副本、下载、小地图、可收起的会话面板。 |
+| 🖱️ **像工具一样顺手的画布** | 按类别、脚本镜头顺序（跳过空镜头）或原地整理（避开未选节点），预览自动或 1–8 列布局，一次撤销最多 1000 个受影响节点。Agent 的整理建议显示在安静的建议栏与会话卡片中，由你预览当前布局后应用或忽略。多选工具栏提供对齐、等距分布和原地整理；拖动时显示边缘与中心吸附线，按住 Alt 可暂停吸附。带模型与参数选择的浮动提示词面板、⊕ 快速延伸、右键菜单、复制/粘贴/创建副本、下载、小地图、可收起的会话面板。 |
 
 ## 细节一览
 
@@ -325,7 +325,7 @@ Seedance 2.0 和 Seedance 2.5（`doubao-seedance-2-5-260628`）支持视频参�
 - **画面变换**：主轨和叠加片段都可裁切画面，为裁切框、叠加位置、宽度和透明度设置素材时间关键帧；在编辑器中编辑关键帧菱形、缓动和裁切手柄，比例锁定随当前裁切框推导，显式选择在片段存在期间生效；预览与导出使用同一套变换计算。
 - **文字**：最多 2 条文字轨，有字幕、综艺花字、电影字幕、标题四种预设。可用四款内置字体（思源黑体、得意黑、霞鹜文楷、站酷快乐体），也可上传自己的 TTF/OTF，上传字体的授权由用户自己负责。「字幕联动」默认打开，字幕跟着所在的视频片段移动和删除。
 - **预览**：浏览器预览按导出用的字体和时间显示变速、转场和文字，像素上可能略有差异，以导出为准。
-- **导出**：用 ffmpeg 导出为普通视频或音频节点；只有文字时用黑底导出。
+- **导出**：用 ffmpeg 导出为普通视频或音频节点；只有文字时用黑底导出。按解析后的输出尺寸检查硬件支持，不兼容的尺寸使用软件编码；实际硬件编码失败时用软件重试一次。导出日志记录实际使用的编码器。
 
 Agent（Codex、DeepSeek、Claude Code）可以建立、修改同样的剪辑（包括叠加）并导出。
 
@@ -355,6 +355,8 @@ Agent（Codex、DeepSeek、Claude Code）可以建立、修改同样的剪辑（
 | 删除选中 | <kbd>Delete / Backspace</kbd> |
 | 移动聚焦节点 / 加速移动 | <kbd>← ↑ → ↓ / Shift ← ↑ → ↓</kbd> |
 | 越界移出框 | <kbd>⌘ 拖动</kbd> |
+| 将所选节点放入新框 | <kbd>⌘ G</kbd> |
+| 拖动时暂停吸附 | <kbd>Alt（Option）</kbd> |
 | 全屏预览图片 / 视频 | <kbd>Space</kbd> |
 | 切换版本 / 设为当前 / 退出版本选择 | <kbd>[ / ] / Enter / Esc</kbd> |
 | 保存文本或提示词 / 取消编辑 | <kbd>⌘ Enter / Esc</kbd> |
@@ -541,8 +543,9 @@ RFC 0010 升级保留历史事件与请求记录：旧游标重取当前快照�
 - [x] RFC 0047 [结果占位节点](docs/rfc/0047-result-placeholders.md)（已实现）：没有指定目标的生成结果在提交时就在画布上建好空节点，显示生成中，位置不再变；产物填入该节点，失败显示在它上面，取消时若仍为空则移除。回执里带节点 ID，Agent 可以立刻为它命名或连线
 - [x] RFC 0048 [Agent 自带能力](docs/rfc/0048-agent-native-capabilities.md)（已实现）：Agent 保留自己的能力，产品只守硬性边界（密钥、费用、网关权限、工作目录之外的写入、不渲染 HTML）。Codex 开启实时网页搜索并在会话里显示，自动审批放行 Agent 自带的只读网页搜索与读取，生成指南要求 Agent 真正读取模型文档，判定页面无法访问前必须写明网址和错误
 - [x] RFC 0049 [Child session model and effort](docs/rfc/0049-child-agent-model.md) (implemented): on author or author-written skill/workflow direction, Agents discover exact model, effort and service-tier ids, configure a new or existing direct child, and read back its settings; self configuration stays UI-only; Claude discovers models and per-model efforts through its SDK, caches successful catalogs by the forwarded-auth hash, rejects failed reads for retry and applies explicit session settings before its environment default; indexed session labels include effort-only and speed-only settings, resolve catalogs without blocking review, and keep session-button accessible names stable
-- [x] RFC 0050 [Clip transforms](docs/rfc/0050-clip-transforms.md): keyframed crop on main-track and overlay clips (a shrinking crop is the push-in), animatable overlay position, width and opacity, source-time keys with linear / ease in-out / hold, one shared preview/export evaluator, and a minimal editor with Inspector diamonds, aspect-locked crop handles, locks retained only by accepted choices or crop geometry edits with known media dimensions and cleared by reset, timeline keys and undo. Agent guides document the same schema; fake Codex and DeepSeek acceptance covers writes, visible keys, preview samples and validation feedback. No motion presets or auto-reframe.
+- [x] RFC 0050 [Clip transforms](docs/rfc/0050-clip-transforms.md): keyframed crop on main-track and overlay clips (a shrinking crop is the push-in), animatable overlay position, width and opacity, source-time keys with linear / ease in-out / hold, one shared preview/export evaluator, and a minimal editor with Inspector diamonds, aspect-locked crop handles, locks retained only by accepted choices or crop geometry edits with known media dimensions and cleared by reset, timeline keys and undo. Agent guides document the same schema; fake Codex and DeepSeek acceptance covers writes, visible keys, preview samples and validation feedback. No motion presets or auto-reframe. Windows export checks device support at the resolved frame size and retries a hardware failure once with software, preserving output settings and logging the used encoder.
 - [x] RFC 0051 [Viewed images in the transcript](docs/rfc/0051-viewed-images-in-transcript.md) (implemented): images an Agent actually viewed (Codex `imageView`, Claude Code `Read` returning an image, ACP results with image content) appear as a "Viewed N images" card grid in the session transcript. A UI-only `asset.resolvePaths` maps paths to project assets only when they canonicalize to a project blob; anything else, such as workDir scratch files, shows a filename placeholder and is never served. Clicking a card locates its canvas node or opens the preview.
+- [x] RFC 0052 [Canvas layout](docs/rfc/0052-canvas-layout.md) (implemented)：按类别、脚本或原地整理，预览自动或 1–8 列，通过共享规划器一次整理并撤销最多 1000 个受影响节点。作者可创建与编辑框，对齐、等距分布和原地整理多选节点，拖动时显示吸附线（Alt 暂停）。网关拒绝 Agent 移动或缩放已有节点；安静的建议栏与会话卡片让作者在当前画布上预览建议，再应用或忽略，修改方式或列数则变为作者自己的整理。替代、过期、本地化状态与事件刷新保持建议同步。
 - [ ] 已知问题：Windows 上的测试稳定性和一些 UI 小问题，清单见 [docs/known-issues.md](docs/known-issues.md)
 - [ ] 负载下的性能：Windows 上机器负载高时，单测和浏览器测试会超时（页面加载超过 5 秒、每个测试文件各自启动 studiod 和 Chrome）；浏览器 e2e 已改为同时跑 4 个文件，准备阶段的超时消失、总时长不变；下一步测量启动、首屏加载和单测并行度，并确认应用本身是否也会变慢
 - [ ] 「释放」：空闲时关闭项目（RFC 0011 推迟）

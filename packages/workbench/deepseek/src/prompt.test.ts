@@ -16,6 +16,12 @@ it('shared instructions use the canvas MCP tools available to DeepSeek', () => {
   expect(instructions.slice(0, CORE_INSTRUCTIONS.length)).toBe(CORE_INSTRUCTIONS)
 })
 
+it.each([false, true])('protects existing layouts and limits organize proposals with expanded access %s', expanded => {
+  for (const text of ['Leave positions to the server', 'Never move or resize existing nodes', 'gateway refuses it', 'canvas.organize.propose', 'at most once per finished batch', 'visibly disordered', 'reason in one sentence']) {
+    expect(agentInstructions(expanded)).toContain(text)
+  }
+})
+
 it.each([false, true])('keeps the shared core byte-identical with expanded access %s', expanded => {
   for (const isolation of ['sandbox', 'none'] as const) {
     const instructions = agentInstructions(expanded, undefined, isolation)

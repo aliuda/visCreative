@@ -138,6 +138,9 @@ importers:
       '@vis/assets':
         specifier: workspace:*
         version: link:../../assets
+      '@vis/canvas-layout':
+        specifier: workspace:*
+        version: link:../layout
       '@vis/domain':
         specifier: workspace:*
         version: link:../../domain
@@ -151,8 +154,17 @@ importers:
         specifier: workspace:*
         version: link:../../storage
 
+  packages/canvas/layout:
+    dependencies:
+      '@vis/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+
   packages/canvas/ui:
     dependencies:
+      '@vis/canvas-layout':
+        specifier: workspace:*
+        version: link:../layout
       '@vis/protocol':
         specifier: workspace:*
         version: link:../../protocol

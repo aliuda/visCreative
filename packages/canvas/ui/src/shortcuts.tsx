@@ -23,6 +23,8 @@ function shortcutsFor(locale: Locale): readonly Shortcut[] {
     { id: 'delete', group: m.shortcutNodeGroup, label: m.shortcutDeleteLabel, labelEn: en.shortcutDeleteLabel, keys: m.shortcutDeleteKeys, keysEn: en.shortcutDeleteKeys, common: true },
     { id: 'move', group: m.shortcutNodeGroup, label: m.shortcutMoveLabel, labelEn: en.shortcutMoveLabel, keys: m.shortcutMoveKeys, keysEn: en.shortcutMoveKeys },
     { id: 'leave-frame', group: m.shortcutNodeGroup, label: m.shortcutLeaveFrameLabel, labelEn: en.shortcutLeaveFrameLabel, keys: m.shortcutLeaveFrameKeys, keysEn: en.shortcutLeaveFrameKeys },
+    { id: 'frame-selection', group: m.shortcutNodeGroup, label: m.shortcutFrameSelectionLabel, labelEn: en.shortcutFrameSelectionLabel, keys: m.shortcutFrameSelectionKeys, keysEn: en.shortcutFrameSelectionKeys },
+    { id: 'suspend-snap', group: m.shortcutNodeGroup, label: m.shortcutSuspendSnapLabel, labelEn: en.shortcutSuspendSnapLabel, keys: m.shortcutSuspendSnapKeys, keysEn: en.shortcutSuspendSnapKeys },
     { id: 'preview', group: m.shortcutNodeGroup, label: m.shortcutPreviewLabel, labelEn: en.shortcutPreviewLabel, keys: m.shortcutPreviewKeys, keysEn: en.shortcutPreviewKeys, common: true },
     { id: 'versions', group: m.shortcutNodeGroup, label: m.shortcutVersionsLabel, labelEn: en.shortcutVersionsLabel, keys: m.shortcutVersionsKeys, keysEn: en.shortcutVersionsKeys },
     { id: 'save-text', group: m.shortcutNodeGroup, label: m.shortcutSaveTextLabel, labelEn: en.shortcutSaveTextLabel, keys: m.shortcutSaveTextKeys, keysEn: en.shortcutSaveTextKeys },

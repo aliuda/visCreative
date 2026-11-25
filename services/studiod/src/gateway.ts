@@ -1,5 +1,5 @@
 import { assertAgentTextWrites, childTextOps } from './writing-permissions'
-import { assertAgentMediaPurpose } from './canvas-permissions'
+import { assertAgentLayout, assertAgentMediaPurpose } from './canvas-permissions'
 import type { MediaTools } from '@vis/assets'
 import { appendNotice, getGuide } from '@vis/workbench-core'
 import { VisError } from '@vis/domain'
@@ -261,16 +261,28 @@ export function createGateway(deps: GatewayDeps): Gateway {
         if (writesScene) requireAgentWriteSession(tx, ctx.conn.agent!.sessionId)
         const ops = assertAgentSceneWrites(nodes, p.ops)
         assertAgentMediaPurpose(tx, ops)
+        assertAgentLayout(tx, ops)
         assertAgentTextWrites(tx, ops)
         return childTextOps(tx, ctx.conn.agent!.sessionId, ops)
       })
       return ctx.host.db.transaction(tx => {
         return ctx.host.canvas.apply({ kind: 'agent', sessionId: ctx.conn.agent!.sessionId }, { ...p, ops: childTextOps(tx, ctx.conn.agent!.sessionId, p.ops) }, applyTx => {
           assertAgentMediaPurpose(applyTx, p.ops)
+          assertAgentLayout(applyTx, p.ops)
           assertAgentTextWrites(applyTx, p.ops)
         })
       }, { behavior: 'immediate' })
     },
+    'canvas.organize': (p, { host }) => host.canvas.organize(p),
+    'canvas.organize.propose': (p, ctx) => {
+      agentTurn(ctx)
+      return ctx.host.organizeProposals.propose(ctx.conn.agent!.sessionId, p, tx => { requireAgentWriteSession(tx, ctx.conn.agent!.sessionId) })
+    },
+    'canvas.organize.proposals': (p, ctx) => {
+      if (ctx.caller === 'agent') agentTurn(ctx)
+      return ctx.host.organizeProposals.list(p)
+    },
+    'canvas.organize.resolve': (p, { host }) => host.organizeProposals.resolve(p),
     'canvas.undo': (p, { host }) => host.canvas.undo(p),
     // Settings use the same active-session write gate as canvas operations.
     'entity.list': (p, ctx) => {

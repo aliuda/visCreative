@@ -26,7 +26,7 @@ Latest Windows rerun: 2026-11-06 on `13945ca`, on the same machine and toolchain
 | Writing preview alone, normal / 6x CPU throttle | All 8 tests passed in each run |
 | Real ZIP staging and open-handle checks | All 6 supplemental tests passed, with the same accept, reject and lock results recorded below |
 
-All three failures were the same case, `work-board.e2e.ts:597` (queued work after recall), fixed as described above. The `session-panel.e2e.ts` teardown `EPERM` from 2026-11-05 did not recur in these four rounds, and no log contained `EPERM`, an unhandled error or a database-closed rejection. That does not close it, because the cause is unproven. Logs are under `%TEMP%\vis-windows-rerun-2026-11-06`. This rerun did not repeat the performance harness, LGPL-build work or real-Agent acceptance.
+All three failures were the same case, `work-board.e2e.ts:597` (queued work after recall), fixed as described above. The `session-panel.e2e.ts` teardown `EPERM` from 2026-11-05 did not recur in these four rounds, and no log contained `EPERM`, an unhandled error or a database-closed rejection. That does not close it, because the cause is unproven. It recurred once on 2026-11-25, in the first of three full rounds after merging RFC 0052 and the timeline export fix: `session-panel.e2e.ts:109` failed removing `%TEMP%\vis-work-projects-*` with `EPERM` after all 22 tests in the file had passed; the next two full rounds were green. Logs are under `%TEMP%\vis-windows-rerun-2026-11-06`. This rerun did not repeat the performance harness, LGPL-build work or real-Agent acceptance.
 
 ### Windows rerun on 2026-11-05
 

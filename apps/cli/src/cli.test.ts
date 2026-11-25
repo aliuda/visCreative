@@ -61,6 +61,8 @@ it('derives asset list, asset label and library state commands from the agent ca
     [['asset', 'list'], 'asset.list', { labeled: false }],
     [['asset', 'label'], 'asset.label', { items: [{ assetId: 'asset', category: 'Portrait' }] }],
     [['library', 'state'], 'library.state', {}],
+    [['canvas', 'organize', 'propose'], 'canvas.organize.propose', { mode: 'category', reason: 'The finished results overlap.' }],
+    [['canvas', 'organize', 'proposals'], 'canvas.organize.proposals', {}],
   ] as const) {
     const help = await invoke([...command, '--help'])
     expect(help.code).toBe(0)

@@ -27,3 +27,4 @@ export { SkillCopyBadges } from './SkillCopyBadges'
 export type { SkillDraftHost } from './SkillDraftCard'
 
 export type { SceneProposalHost } from './SceneProposalCard'
+export type { OrganizeProposalHost } from './OrganizeProposalCard'

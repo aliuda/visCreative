@@ -82,7 +82,6 @@ export type NodeGeneration = z.infer<typeof NodeGeneration>
 export const FrameView = z.object({
   title: z.string(),
   color: FrameColor,
-  // Bound work item; the frame title follows the work item title, edited on the card.
 })
 export type FrameView = z.infer<typeof FrameView>
 
@@ -157,7 +156,7 @@ export const CanvasOp = z.discriminatedUnion('op', [
   // The server recursively moves the entire frame by current membership; members do not count toward the operation batch size.
   z.object({ op: z.literal('frame.move'), nodeId: Id, dx: z.number(), dy: z.number() }),
   z.object({ op: z.literal('frame.create'), tempId: z.string().min(1).max(64), ...Size, title: z.string().trim().min(1).max(60), color: FrameColor.optional() }),
-  // Frames bound to work items can only change color; their titles follow the work item.
+  // Rename or recolor a frame. Frames are not bound to work items since RFC 0010.
   z.object({ op: z.literal('frame.update'), nodeId: Id, title: z.string().trim().min(1).max(60).optional(), color: FrameColor.optional() }),
   z.object({ op: z.literal('node.setInputs'), nodeId: Id, inputNodeIds: z.array(Id) }),
   // 0016: only change provided fields; null category or title means clear.
@@ -180,6 +179,41 @@ export const CanvasOp = z.discriminatedUnion('op', [
   z.object({ op: z.literal('scene.set'), slotId: Id, expectedRevision: Revision, doc: SceneDoc }),
 ])
 export type CanvasOp = z.infer<typeof CanvasOp>
+
+// 0052: Organize modes and limits, shared by the preview, canvas.organize and (step d) Agent proposals.
+export const OrganizeMode = z.enum(['category', 'script', 'inPlace'])
+export type OrganizeMode = z.infer<typeof OrganizeMode>
+export const ORGANIZE_LIMITS = { nodes: 1000, columns: 8 } as const
+export const OrganizeColumns = z.union([z.literal('auto'), z.int().min(1).max(ORGANIZE_LIMITS.columns)])
+export type OrganizeColumns = z.infer<typeof OrganizeColumns>
+
+// 0052 step d: an Agent's suggestion to organize. It stores parameters, not a plan: frame titles are localized by the
+// author's UI, so the author's preview replans on the current canvas and its digest guards the apply.
+export const ORGANIZE_PROPOSAL_LIMITS = { pending: 20, reason: 300 } as const
+export const OrganizeProposalStatus = z.enum(['pending', 'applied', 'dismissed', 'stale', 'superseded', 'expired'])
+export type OrganizeProposalStatus = z.infer<typeof OrganizeProposalStatus>
+export const OrganizeProposal = z.object({
+  proposalId: Id,
+  sessionId: Id,
+  mode: OrganizeMode,
+  nodeIds: z.array(Id).min(1).max(ORGANIZE_LIMITS.nodes).optional(),
+  columns: OrganizeColumns,
+  reason: z.string(),
+  // Nodes and frames the plan would change when it was proposed.
+  changed: z.int().min(1),
+  status: OrganizeProposalStatus,
+  createdAt: z.int(),
+  resolvedAt: z.int().optional(),
+  // The author's organize write, when applied.
+  operationId: Id.optional(),
+})
+export type OrganizeProposal = z.infer<typeof OrganizeProposal>
+const OrganizeApply = {
+  removeEmptyFrames: z.boolean(),
+  titles: z.object({ uncategorized: z.string().trim().min(1).max(60), untitledScript: z.string().trim().min(1).max(60) }),
+  description: z.string().max(500).optional(),
+  planDigest: z.string().min(1).max(128),
+}
 
 const history = {
   params: z.object({ requestId: RequestId }),
@@ -211,5 +245,54 @@ export const canvas = {
       snapshot: z.literal('turn').optional(),
     }),
     result: z.object({ nodes: z.array(NodeView) }),
+  },
+  // 0052: the UI previews a plan from @vis/canvas-layout; the server replans in the write transaction and applies it only if the digest still matches.
+  organize: {
+    params: z.object({
+      requestId: RequestId,
+      mode: OrganizeMode,
+      // Absent means the whole canvas; inPlace needs at least two nodes, which the planner enforces.
+      nodeIds: z.array(Id).min(1).max(ORGANIZE_LIMITS.nodes).optional(),
+      columns: OrganizeColumns.default('auto'),
+      // titles: localized by the caller, for the uncategorized frame in category mode and an untitled script's frame in script mode.
+      // description: shown in undo history, as on canvas.apply.
+      // planDigest: organizePlanDigest of the previewed plan; a mismatch means the canvas changed since the preview.
+      ...OrganizeApply,
+    }),
+    result: z.object({
+      operationId: Id,
+      idMap: z.record(z.string(), Id),
+      // Nodes and frames the plan created, moved, resized or deleted.
+      changed: z.int().min(1),
+      eventSeq: z.int(),
+    }),
+  },
+  // 0052 step d: Agents suggest; only the author applies.
+  organizePropose: {
+    params: z.object({
+      requestId: RequestId,
+      mode: OrganizeMode,
+      nodeIds: z.array(Id).min(1).max(ORGANIZE_LIMITS.nodes).optional(),
+      columns: OrganizeColumns.default('auto'),
+      reason: z.string().trim().min(1).max(ORGANIZE_PROPOSAL_LIMITS.reason),
+    }),
+    result: OrganizeProposal,
+  },
+  organizeProposals: {
+    params: z.object({ status: z.enum(['pending', 'all']).default('pending') }),
+    result: z.object({ proposals: z.array(OrganizeProposal) }),
+  },
+  organizeResolve: {
+    params: z.discriminatedUnion('action', [
+      z.object({ requestId: RequestId, proposalId: Id, action: z.literal('apply'), ...OrganizeApply }),
+      z.object({ requestId: RequestId, proposalId: Id, action: z.literal('dismiss') }),
+    ]),
+    result: z.object({
+      proposal: OrganizeProposal,
+      // Set when applied, as on canvas.organize.
+      operationId: Id.optional(),
+      changed: z.int().min(1).optional(),
+      eventSeq: z.int().optional(),
+    }),
   },
 } as const

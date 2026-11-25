@@ -154,6 +154,11 @@ const CORE_METHODS = {
   },
   'canvas.undo': { ...canvas.undo, callers: ui, summary: '撤销画布操作', description: '撤销最近的用户画布批次，整步原子执行。内容被其他调用方修改或节点被删除时返回 revision_conflict，不跳过冲突条目。须携带 requestId。' },
   'canvas.redo': { ...canvas.redo, callers: ui, summary: '重做画布操作', description: '重做最近撤销的用户画布批次，新用户操作清空重做栈。冲突时整步拒绝。须携带 requestId。' },
+  'canvas.organize': { ...canvas.organize, callers: ui, summary: '整理画布', description: '按类别、剧本或原地整理画布，整步原子执行并可一次撤销。服务端在写事务内用同一规划器重新计算，planDigest 与预览不一致时返回 revision_conflict（canvas.organize_plan_changed），界面重新预览；超过 1000 个节点返回 invalid_params（canvas.organize_too_large）；没有可整理的内容返回 invalid_params（canvas.organize_nothing）。只改位置、尺寸、框和整理后为空的框，不改内容与类别。须携带 requestId。' },
+  'canvas.organize.propose': { ...canvas.organizePropose, callers: agent, summary: 'Suggest organizing canvas nodes; the author previews and decides',
+    description: 'You cannot move or resize existing nodes (canvas.layout_protected); suggest an organize instead. mode: category (frames by node category), script (frames per script, rows by shot, columns by role) or inPlace (a grid where the nodes are, at least two nodeIds). Omit nodeIds for the whole canvas. reason is one sentence the author sees. Propose at most once per finished batch of results, and only when the area is visibly disordered. A new proposal from this session replaces its pending one. Nothing moves until the author applies it, and you are not told when they do. Requires requestId.' },
+  'canvas.organize.proposals': { ...canvas.organizeProposals, callers: both, summary: 'List organize suggestions and their states' },
+  'canvas.organize.resolve': { ...canvas.organizeResolve, callers: ui, summary: '应用或忽略整理建议' },
   'canvas.get': {
     ...canvas.get,
     callers: both,

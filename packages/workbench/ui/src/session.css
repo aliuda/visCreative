@@ -468,3 +468,6 @@
 .vis-scene-proposal-card li { display: flex; justify-content: space-between; gap: 12px; margin: 6px 0; }
 .vis-scene-proposal-card li > span:last-child { color: var(--vis-text-dim); }
 .vis-scene-proposal-card > div { display: flex; gap: 6px; flex-wrap: wrap; }
+.vis-organize-proposal-card { margin: 10px 0; padding: 12px; border: 1px solid var(--vis-panel-border); border-radius: var(--vis-radius); background: var(--vis-panel); font-size: 12px; }
+.vis-organize-proposal-card p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.vis-organize-proposal-card [role=status] { color: var(--vis-text-dim); margin-right: 12px; }

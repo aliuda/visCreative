@@ -18,11 +18,12 @@ const ALLOWED = {
   'generation': [...CORE, 'assets'],
   // The two systems do not depend on each other; they collaborate through domain ports injected by studiod
   // 0027: scripts cast project settings from library-core
-  'canvas-core': [...CORE, 'assets', 'library-core'],
+  'canvas-core': [...CORE, 'assets', 'library-core', 'canvas-layout'],
   'workbench-core': CORE,
   'ui-kit': [],
   // UI interacts with the backend only through protocol and must not import any core package
-  'canvas-ui': ['protocol', 'ui-kit'],
+  'canvas-ui': ['protocol', 'ui-kit', 'canvas-layout'],
+  'canvas-layout': ['protocol'],
   'workbench-ui': ['protocol', 'ui-kit'],
   // 0024b: the timeline editor; canvas-ui does not depend on it, the host mounts it and injects 'open timeline'
   'timeline-ui': ['protocol', 'ui-kit'],

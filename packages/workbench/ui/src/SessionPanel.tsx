@@ -9,6 +9,7 @@ import type { BatchApprovalActions } from './BatchApprovalCard'
 import { workTranscript } from './workBlocks'
 import { WorkBlock } from './WorkBlock'
 import { SceneProposalCard, type SceneProposalHost } from './SceneProposalCard'
+import { OrganizeProposalCard, type OrganizeProposalHost } from './OrganizeProposalCard'
 import { SkillDraftCard, type SkillDraftHost } from './SkillDraftCard'
 import { GenerationResult } from './GenerationResult'
 import { type ProjectOption, type SkillOption, WorkspaceDialog, type WorkspaceInput, type DirectoryPicker } from './WorkspaceDialog'
@@ -35,6 +36,7 @@ export type { RefPreview } from './RefThumb'
 
 export type SessionPanelProps = ViewedImageHost & {
   sceneProposalHost?: SceneProposalHost
+  organizeProposalHost?: OrganizeProposalHost
   skillDraftHost?: SkillDraftHost
 
   scriptBatches?: ReadonlyMap<string, import('@vis/protocol').BatchView>
@@ -408,6 +410,8 @@ function Conversation(p: SessionPanelProps & ComposerDraft & { session: SessionS
             ? <GenerationResult key={group.job.jobId} job={group.job} archived={archived} resolveAsset={p.resolveAsset} assetUrl={p.assetUrl} posterUrl={p.posterUrl} onLocateRef={p.onLocateRef} onAddRef={p.onAddRef} onAddAssetRef={p.onAddAssetRef} />
             : group.kind === 'sceneProposal'
             ? <SceneProposalCard key={group.proposal.proposalId} proposal={group.proposal} host={p.sceneProposalHost} />
+            : group.kind === 'organizeProposal'
+            ? <OrganizeProposalCard key={group.receipt.proposalId} receipt={group.receipt} host={p.organizeProposalHost} />
             : group.kind === 'skillDraft'
             ? <SkillDraftCard key={group.draft.draftId} draft={group.draft} host={p.skillDraftHost} />
             : group.item.kind === 'approval'

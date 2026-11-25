@@ -5,8 +5,11 @@ import { type Actor, applyOps } from './apply'
 import { changeHistory } from './undo'
 import { deliverOutput, releasePlaceholders, reservePlaceholder } from './delivery'
 import { readNodes, readSlotHistory, readSnapshotNodes } from './views'
+import { planOrganize } from '@vis/canvas-layout'
+import { applyOrganize } from './organize'
 
 export interface CanvasService extends Required<CanvasDeliveryPort<SpaceTx>> {
+  organize(params: MethodParams<'canvas.organize'>): MethodResult<'canvas.organize'>
   undo(params: MethodParams<'canvas.undo'>): MethodResult<'canvas.undo'>
   redo(params: MethodParams<'canvas.redo'>): MethodResult<'canvas.redo'>
   /**
@@ -23,6 +26,14 @@ export function createCanvasService(deps: { db: SpaceDb; now?: () => number; onC
   const { db } = deps
   const now = deps.now ?? Date.now
   return {
+    organize(params) {
+      return runIdempotent(db, { requestId: params.requestId, method: 'canvas.organize', params }, tx => {
+        const plan = planOrganize({ ...params, nodes: readNodes(tx) })
+        const result = applyOrganize(tx, params, plan, now())
+        deps.onChanged?.(tx)
+        return result
+      }, now)
+    },
     undo(params) {
       return runIdempotent(db, { requestId: params.requestId, method: 'canvas.undo', params }, tx => { const result = changeHistory(tx, 'undo', params.requestId, now()); deps.onChanged?.(tx); return result }, now)
     },

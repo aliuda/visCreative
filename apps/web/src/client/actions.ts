@@ -191,6 +191,15 @@ export function canvasActions(conn: SpaceConnection, notify: (n: Omit<Notice, 'i
       } catch (error) { fail(() => m().uploadReferences)(error) }
     },
 
+    onOrganize: async params => {
+      await call('canvas.organize', { ...params, requestId: rid() })
+    },
+    onResolveOrganize: async params => {
+      const result = await call<MethodResult<'canvas.organize.resolve'>>('canvas.organize.resolve', { ...params, requestId: rid() })
+      if (params.action === 'apply' && !result.operationId) notify({ kind: 'info', text: m().organizeNothingLeft })
+      return result
+    },
+
     onApply: (ops, description) => {
       const requestLocale = getLocale()
       return apply(ops, description).catch(async error => {

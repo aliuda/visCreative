@@ -16,6 +16,12 @@ it('script instructions use the vis MCP tools available to Claude', () => {
   expect(SYSTEM_APPEND).toContain('vis MCP tools')
 })
 
+it('protects existing layouts and limits organize proposals using the registered MCP name', () => {
+  for (const text of ['placements', 'Never move or resize existing nodes', 'gateway refuses it', 'mcp__vis__canvas_organize_propose', 'at most once per finished batch', 'visibly disordered', 'reason in one sentence']) {
+    expect(SYSTEM_APPEND).toContain(text)
+  }
+})
+
 it('library instructions use MCP tools and preserve user labels', () => {
   const library = SYSTEM_APPEND.split('<资产库>')[1]!.split('</资产库>')[0]!
   for (const text of ['asset_list', 'asset_label', 'labeled: false', 'nextCursor', 'context', 'path', '50', 'runId', 'skippedFields', '绝不重试', '角色 / 场景 / 物品 / 风格 / 其他', '视频片段 / 成片']) expect(library).toContain(text)

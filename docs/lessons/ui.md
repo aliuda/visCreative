@@ -1,5 +1,12 @@
 # UI lessons
 
+## Label padding is not foreground content
+
+- **Symptom:** a motion-glyph browser assertion fails by 0.03125 CSS pixels on Windows, before any overlay edit.
+- **Cause:** the assertion compares the glyph with the clip label's gradient and padding box. Normal line height and the middle-aligned inline image icon depend on font metrics; the visible label content actually starts almost nine pixels below the glyph. DPR 1 and 2 produce identical boxes.
+- **Instead:** compare the glyph bottom with a DOM Range around the label's foreground text and icon. Keep the strict no-overlap inequality and the persisted keyframe assertions; neither a tolerance nor a layout delay describes this invariant.
+- **Found in:** [RFC 0050 Windows acceptance correction](../rfc/0050-clip-transforms.md#windows-export-and-label-acceptance-2026-11-25), `timeline-keyframes.e2e.ts`.
+
 ## Transcript variants must survive turn grouping
 
 - **Symptom:** image-view receipts form thumbnail groups in `groupTranscript`, but disappear from the session or break its step renderer.
@@ -154,6 +161,13 @@
 - **Instead:** scale image and video heights with the new width, and send `h` in the `node.layout` op.
 - **Found in:** `packages/canvas/ui/src/organization.ts`.
 
+## Reading-order row bands need a fixed top edge
+
+- **Symptom:** nearly aligned cards lose their left-to-right order, or a chain of slightly lower cards collapses distinct rows.
+- **Cause:** sorting directly by y ignores manual alignment drift; comparing pairwise y tolerance or extending a row from its last member does not define stable row boundaries.
+- **Instead:** sort by absolute top edge first, anchor each row band to its topmost member, then sort each row by x with node ID as the final tie-break. Verify a second organize after applying frame creation, node layouts and the server's final center-point membership rule, including selected-only anchored frames.
+- **Found in:** [RFC 0016 reading-order correction](../rfc/0016-canvas-organization.md#2-摆放不再重叠), `packages/canvas/ui/src/organization.ts` and `organization.test.ts`.
+
 ## Organizing placeholders leaves cards overlapping once images land
 
 - **Symptom:** after Organize, images in a frame covered the row below once their generations finished.
@@ -224,3 +238,67 @@
 - **Cause:** optional display metadata was awaited with the review load, and card/drawer labels had separate implementations.
 - **Instead:** render review data independently, share a per-kind client cache for pending, successful and briefly failed catalog reads, and resolve labels after render. Keep one indexed session-label helper and a separate stable accessible name for the session button; show effort-only and tier-only settings too. Hold a catalog response in the browser test and verify review actions remain usable before releasing it.
 - **Found in:** [RFC 0049 review corrections](../rfc/0049-child-agent-model.md#review-corrections-2026-11-13), `packages/workbench/ui/src/agentModels.ts` and `work/sessionLabels.ts`.
+
+
+## Obstacle packing must shift a complete reading-order row
+
+- **Symptom:** repeated selected organization changes the order when only one column hits an unselected card.
+- **Cause:** pushing individual cells down can split a row, so the next reading-order pass sees a different sequence.
+- **Instead:** compute column widths and per-row heights first, then shift every cell in a colliding row by the same amount. Apply this to in-place framed partitions too, keeping unselected members and nested frames as obstacles even when a frame is selected. Preserve the existing frame growth rules and test a second plan after applying geometric membership.
+- **Found in:** [RFC 0052 step a](../rfc/0052-canvas-layout.md#step-a-implementation-2026-11-25), `packages/canvas/layout/src/index.ts`.
+
+## A preview digest protects planned operations
+
+- **Symptom:** a source move can keep an Organize digest unchanged even though the canvas changed.
+- **Cause:** the digest hashes target operations; a node already scheduled to move can still have exactly the same target after the edit.
+- **Instead:** test outcome-changing and outcome-preserving edits separately. Reject changes to the previewed ops, accept identical ops, and avoid claiming the digest proves the source canvas was unchanged.
+- **Found in:** [RFC 0052 §4](../rfc/0052-canvas-layout.md#4-canvasorganize-server-side-apply), `organizePlanDigest`.
+
+## Open-canvas packing must avoid final frame bounds
+
+- **Symptom:** an in-place selection containing both framed and open-canvas cards can give an open card frame membership after apply.
+- **Cause:** the frame grows around its selected members after the open partition has already packed against its old bounds. Membership then uses final center points.
+- **Instead:** arrange framed partitions first and pack the open partition against their final growth, including ancestor frames. Preview existing frames at those same final bounds, and verify membership and idempotence after applying the plan.
+- **Found in:** [RFC 0052 step a](../rfc/0052-canvas-layout.md#step-a-implementation-2026-11-25), `packages/canvas/layout/src/index.ts`.
+
+## Empty script shots must not reserve layout rows
+
+- **Symptom:** organizing a script with generated nodes for only a few shots leaves uneven blank space between them.
+- **Cause:** each empty shot contributed a zero-height row that still added the standard node gap.
+- **Instead:** filter documented shots to those with linked members before calculating row offsets, retaining script order and appending orphan-shot rows afterward. Check exact adjacent-row spacing and a second plan for both whole-canvas and selected organization.
+- **Found in:** [RFC 0052 step a](../rfc/0052-canvas-layout.md#step-a-implementation-2026-11-25), `packages/canvas/layout/src/index.ts`.
+
+## Grow frame ancestors before changing an inner frame
+
+- **Symptom:** creating or fitting an inner frame can briefly detach it or assign its old parent to it.
+- **Cause:** each `node.layout` and `frame.create` recomputes center-point membership immediately; a larger inner frame can outgrow its parent before the next operation expands that parent.
+- **Instead:** calculate conservative ancestor growth against the prospective inner bounds, then apply those ancestor layouts from outside in before creating or fitting the inner frame, all in one batch. Fit direct members, including nested frames themselves, and verify member centers remain inside without moving any member.
+- **Found in:** [RFC 0052 step b](../rfc/0052-canvas-layout.md#step-b-implementation-2026-11-25), `packages/canvas/ui/src/frameBounds.ts`.
+
+## Snapped drags must retain the raw pointer layout
+
+- **Symptom:** a guide disappears when Alt/Option is pressed but the card stays snapped, or the committed position jumps back to React Flow's unconstrained pointer position.
+- **Cause:** keyboard modifier events do not emit another drag event, and React Flow's stop payload can still contain the raw pointer position. Selection drags also use React mouse events, while individual node drags use native mouse/touch events.
+- **Instead:** retain the last raw drag payload, recompute snapping and frame constraints on both Alt key transitions, adapt selection events through `nativeEvent`, and use the same final layout for the preview and the single commit. Remove guide axes that frame clamping invalidates. Test modifier changes without moving the pointer, and check persisted positions and one-step undo.
+- **Found in:** [RFC 0052 step c](../rfc/0052-canvas-layout.md#step-c-implementation-2026-11-25), `CanvasView.tsx` and `selectionLayout.ts`.
+
+## A frame-only selection gives its toolbar a negative layer
+
+- **Symptom:** a multi-selection toolbar has bounds and visible buttons, but the canvas pane intercepts its clicks when only frames are selected.
+- **Cause:** React Flow derives the toolbar's z-index from its selected nodes; frames deliberately render below ordinary cards with a negative z-index. Its single-node obstacle lookup also cannot identify a group anchor.
+- **Instead:** keep the selection toolbar above the pane with a positive minimum layer and expose the group's bounds through the existing canvas-obstacle mechanism. Verify a frame-only selection can align through the toolbar, moves each member once, and undoes in one step; also verify placement after panning under fixed controls.
+- **Found in:** [RFC 0052 step c](../rfc/0052-canvas-layout.md#step-c-implementation-2026-11-25), `SelectionToolbar.tsx`.
+
+## A deleted proposal selection must not become the whole canvas
+
+- **Symptom:** previewing an Organize suggestion after its selected nodes are deleted can unexpectedly include unrelated nodes.
+- **Cause:** filtering stored IDs down to `[]` changes the category/script planner's meaning to whole-canvas organization.
+- **Instead:** retain the nonempty stored scope while planning against current nodes; the planner naturally skips missing IDs. Use that same scope after the author changes controls. Show an empty preview with only Dismiss when no work remains, and test an unrelated surviving node explicitly.
+- **Found in:** [RFC 0052 step d2](../rfc/0052-canvas-layout.md#step-d2-implementation-2026-11-25), `CanvasView.tsx` and `canvas-organize-proposals.e2e.ts`.
+
+## An unrelated held key must not block canvas deletion
+
+- **Symptom:** a drag persists and its card remains selected, but the following Delete does nothing. In the shared browser fixture, the leftover card then covers another card's resize handle and causes later failures.
+- **Cause:** React Flow's deletion shortcut tracks every pressed key by its case-sensitive `key` value and matches the entire set. A stale `Y` from an earlier redo makes the next Delete look like `Y+Delete`. Releasing Shift before a letter also reproduces this with ordinary browser input: keydown is `Y`, keyup is `y`, and the old entry survives.
+- **Instead:** handle unmodified Delete and Backspace directly on keydown, respecting editors, consumed events, suspension, modifiers and key repeat, and disable React Flow's duplicate deletion shortcut. Reuse the existing server deletion and frame-confirmation path. Regress a complete uppercase/lowercase key release followed by a real drag and deletion, without adding sleeps or weakening the persisted-layout checks.
+- **Found in:** [RFC 0052](../rfc/0052-canvas-layout.md), `CanvasView.tsx` and [canvas deletion regression](../../apps/web/e2e/canvas-delete.e2e.ts).

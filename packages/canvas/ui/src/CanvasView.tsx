@@ -1,18 +1,20 @@
 import { MovExportDialog } from './MovExportDialog'
 import { ChevronRightIcon, CloseIcon, IconButton, describeError, useFormat, useLocale, useMessages } from '@vis/ui-kit'
-import { messages } from './messages'
+import { messages, controlMessages, organizeProposalMessages } from './messages'
 import { nodeWheel } from './wheel'
-import { constrainedMoves, growFrames, leaveFrameOps, memberMoveOps, movedFrameBounds } from './frameBounds'
-import { arrangeCanvas } from './organization'
+import { constrainedMoves, fitFrameOps, frameCreationOps, growFrames, leaveFrameOps, memberMoveOps, movedFrameBounds } from './frameBounds'
+import { frameSelectionBounds, planOrganize, organizePlanDigest } from '@vis/canvas-layout'
 import { EmptyShortcuts, ShortcutDialog } from './shortcuts'
 import { CodeRender } from './CodeRender'
 import { OrganizationPreview } from './OrganizationPreview'
+import { OrganizeProposalBar } from './OrganizeProposalBar'
+import { editOrganizeReview, type OrganizeReview } from './organize-proposal'
 import {
   applyNodeChanges, Background, BackgroundVariant, getNodesBounds, getViewportForBounds, Handle, MiniMap, type NodeChange, type OnNodeDrag, type NodeMouseHandler, type NodeProps,
   NodeResizer, NodeToolbar, Panel, Position, type Viewport,
   ReactFlow, ReactFlowProvider, useNodesInitialized, useReactFlow, useStore,
 } from '@xyflow/react'
-import type { BatchView, CanvasOp, GenerationOperation, JobView, MediaKind, MediaTaskView, MethodParams, NodeKind, NodeView, SlotView, SlotVersionView } from '@vis/protocol'
+import type { BatchView, CanvasOp, FrameColor, GenerationOperation, JobView, MediaKind, MediaTaskView, MethodParams, MethodResult, NodeKind, NodeView, OrganizeMode, OrganizeColumns, OrganizeProposal, SlotView, SlotVersionView } from '@vis/protocol'
 import type { ScriptActions, ScriptAgentState } from './script-ui'
 import { createContext, Fragment, memo, type CSSProperties, type DependencyList, type DragEvent, type MouseEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import '@xyflow/react/dist/style.css'
@@ -31,6 +33,8 @@ import { useNodeVersions, VersionMedia } from './VersionStrip'
 import { WRITING_LIMITS, writingWordCount, LocalOperation } from '@vis/protocol'
 import { OPERATION_PANELS } from './operations-ui'
 import { NodeOperationsToolbar } from './NodeOperationsToolbar'
+import { SelectionToolbar, SnapGuides } from './SelectionToolbar'
+import { alignTargets, buildSnapCandidates, distributeTargets, matchingSnapLines, querySnap, selectionBounds, type Align, type LayoutTarget, type SnapCandidates, type SnapLines } from './selectionLayout'
 import { NodeTitle } from './NodeTitle'
 import { toolbarMessages } from './toolbar-messages'
 import type { ToolbarEntry } from './toolbar'
@@ -80,6 +84,8 @@ export type CanvasActions = ScriptActions & {
   onCreateTimeline?(at: { x: number; y: number }): Promise<string>
   onCreateTimelineFrom?(nodeIds: string[]): Promise<string>
   onApply?(ops: CanvasOp[], description?: string): Promise<void>
+  onOrganize?(params: Omit<MethodParams<'canvas.organize'>, 'requestId'>): Promise<void>
+  onResolveOrganize?(params: Omit<Extract<MethodParams<'canvas.organize.resolve'>, { action: 'apply' }>, 'requestId'> | Omit<Extract<MethodParams<'canvas.organize.resolve'>, { action: 'dismiss' }>, 'requestId'>): Promise<MethodResult<'canvas.organize.resolve'>>
   onRenderCode?(nodeId: string, requestId: string): Promise<{ jobId: string; revision: number }>
   onGetRenderJob?(jobId: string): Promise<JobView>
   onLoadHistory?(slotId: string): Promise<void>
@@ -168,6 +174,9 @@ export type CanvasViewProps = CanvasActions & {
   /** An already-published client snapshot avoids broadcasting each history response through React context. */
   historySource?: CanvasHistorySource
   nodes: NodeView[]
+  organizeProposals?: readonly OrganizeProposal[]
+  organizeSessionTitles?: ReadonlyMap<string, string>
+  organizePreviewRequest?: { proposalId: string; seq: number } | undefined
   focusRequest?: ({ nodeId: string } | { nodeIds: string[] }) & { seq: number } | undefined
   decorations?: ReadonlyMap<string, NodeDecoration>
   /** Dismiss the failure notice on a node */
@@ -189,6 +198,9 @@ type CanvasContext = {
   titleNumbers: ReadonlyMap<string, number>
   decorations: ReadonlyMap<string, NodeDecoration> | undefined
   frameRunning: ReadonlyMap<string, boolean>
+  editingFrameId: string | null
+  editFrameTitle(id: string | null): void
+  saveFrameTitle(id: string, title: string): Promise<void>
   selectNode(id: string): void
   selectedPanel: { nodeId: string; panelId: string } | null
   selectPanel(nodeId: string, panelId: string | null): void
@@ -267,9 +279,11 @@ export function CanvasView({ histories, historySource, ...props }: CanvasViewPro
   )
 }
 
-const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, onDismissJobs, onDismissMediaTask, assetUrl, posterUrl, thumbnailUrl = assetUrl, focusRequest, hidden = false, suspended = false, scriptSessions, currentScriptSessionId, generationOperations, ...actionProps }: Omit<CanvasViewProps, 'histories' | 'historySource'> & { nodeViews: ReadonlyMap<string, NodeView> }) {
+const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, onDismissJobs, onDismissMediaTask, assetUrl, posterUrl, thumbnailUrl = assetUrl, focusRequest, hidden = false, suspended = false, scriptSessions, currentScriptSessionId, generationOperations, organizeProposals, organizeSessionTitles, organizePreviewRequest, ...actionProps }: Omit<CanvasViewProps, 'histories' | 'historySource'> & { nodeViews: ReadonlyMap<string, NodeView> }) {
   const actions = useShallowValue(actionProps)
   const m = useMessages(messages)
+  const cm = useMessages(controlMessages)
+  const om = useMessages(organizeProposalMessages)
   const sm = useMessages(scriptMessages)
   const tl = useMessages(timelineMessages)
   const pv = useMessages(previzMessages)
@@ -288,13 +302,35 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
   const nodes = useMemo(() => allNodes.filter(node => showWorking || node.purpose !== 'working' || node.nodeId === revealedWorkingId), [allNodes, showWorking, revealedWorkingId])
   const [help, setHelp] = useState(false)
   const [organizing, setOrganizing] = useState(false)
+  const [organizeReview, setOrganizeReview] = useState<OrganizeReview | null>(null)
   const [removeEmptyFrames, setRemoveEmptyFrames] = useState(true)
+  const [organizeMode, setOrganizeMode] = useState<OrganizeMode>('category')
+  const [organizeColumns, setOrganizeColumns] = useState<OrganizeColumns>('auto')
+  const [organizeRefresh, setOrganizeRefresh] = useState(0)
   const [categoryIds, setCategoryIds] = useState<string[] | null>(null)
   const [category, setCategory] = useState('')
   const [operationError, setOperationError] = useState<{ error: unknown } | null>(null)
   const [operationBusy, setOperationBusy] = useState(false)
+  const [frameHint, setFrameHint] = useState(false)
+  const [editingFrameId, setEditingFrameId] = useState<string | null>(null)
   const organizeDialog = useRef<HTMLDialogElement>(null)
   const categoryDialog = useRef<HTMLDialogElement>(null)
+  const openOrganizeProposal = useStableCallback((proposal: OrganizeProposal) => {
+    setOperationError(null)
+    setRemoveEmptyFrames(true)
+    setOrganizeMode(proposal.mode)
+    setOrganizeColumns(proposal.columns)
+    setOrganizeReview({ proposal, detached: false })
+    setOrganizing(true)
+  })
+  const previewedRequest = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    if (!organizePreviewRequest || previewedRequest.current === organizePreviewRequest.seq || suspended || hidden) return
+    const proposal = organizeProposals?.find(proposal => proposal.proposalId === organizePreviewRequest.proposalId)
+    if (!proposal) return
+    previewedRequest.current = organizePreviewRequest.seq
+    openOrganizeProposal(proposal)
+  }, [organizePreviewRequest, organizeProposals, suspended, hidden, openOrganizeProposal])
   const [deleteIds, setDeleteIds] = useState<string[] | null>(null)
   const deleteDialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
@@ -333,6 +369,11 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
     catch (error) { setOperationError({ error }); throw error }
     finally { setOperationBusy(false) }
   }
+  const editFrameTitle = useStableCallback((id: string | null) => setEditingFrameId(id))
+  const saveFrameTitle = useStableCallback(async (id: string, title: string) => {
+    await applyOperations([{ op: 'frame.update', nodeId: id, title }], m.renameFrame)
+    setEditingFrameId(null)
+  })
   const growth = useRef(new Set<string>())
   useEffect(() => {
     if (!actions.onApply || operationBusy) return
@@ -348,19 +389,94 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
     return () => clearTimeout(timer)
   }, [allNodes, actions.onApply, operationBusy, m, locale])
   const [flowNodes, setFlowNodes] = useState<VisNode[]>([])
+  const [dragging, setDragging] = useState(false)
+  const [snapGuides, setSnapGuides] = useState<SnapLines>({})
   const selected = flowNodes.filter(node => node.selected)
   const selectedIds = useShallowValue(selected.map(node => node.id).sort())
+  const selectionNodes = useMemo(() => nodes.filter(node => selectedIds.includes(node.nodeId)), [nodes, selectedIds])
+  const tidyPlan = useMemo(() => selectedIds.length >= 2 ? planOrganize({
+    nodes: allNodes, mode: 'inPlace', nodeIds: selectedIds, columns: 'auto', removeEmptyFrames: false,
+    titles: { uncategorized: cm.organizationUncategorized, untitledScript: m.untitledScript },
+  }) : null, [allNodes, selectedIds, cm, m])
+  const applySelectionLayout = (targets: LayoutTarget[], description: string) => {
+    const moves = constrainedMoves(allNodes, targets)
+    if (!moves.some(move => {
+      const node = nodeViews.get(move.nodeId)
+      return node && (node.x !== move.x || node.y !== move.y)
+    })) return
+    void applyOperations(memberMoveOps(allNodes, moves), description).catch(() => {})
+  }
+  const alignSelection = (align: Align) => applySelectionLayout(alignTargets(selectionNodes, align), m[align])
+  const distributeSelection = (axis: 'x' | 'y') => applySelectionLayout(distributeTargets(selectionNodes, axis), axis === 'x' ? m.distributeHorizontal : m.distributeVertical)
+  const tidySelection = async () => {
+    if (!actions.onOrganize || !tidyPlan?.ops.length || tidyPlan.insufficientSelection || tidyPlan.tooLarge) return
+    setOperationBusy(true)
+    setOperationError(null)
+    try {
+      await actions.onOrganize({
+        mode: 'inPlace', nodeIds: selectedIds, columns: 'auto', removeEmptyFrames: false,
+        titles: { uncategorized: cm.organizationUncategorized, untitledScript: m.untitledScript },
+        description: m.tidySelection, planDigest: organizePlanDigest(tidyPlan),
+      })
+    } catch (error) { setOperationError({ error }) }
+    finally { setOperationBusy(false) }
+  }
   const edgeSelection = useMemo(() => new Set(selectedIds), [selectedIds])
   const previousEdges = useRef<ReturnType<typeof inputEdges>>([])
   const edges = useMemo(() => {
     return inputEdges(nodes, edgeSelection, locale, previousEdges.current)
   }, [nodes, edgeSelection, locale])
   useLayoutEffect(() => { previousEdges.current = edges }, [edges])
+  // Keep missing IDs in this nonempty scope: an empty array means the whole canvas to category/script planning.
+  const organizeIds = organizeReview ? organizeReview.proposal.nodeIds : selectedIds.length ? selectedIds : undefined
+  const lockedOrganize = organizeReview && !organizeReview.detached
+  const reviewPending = !!organizeProposals?.some(proposal => proposal.proposalId === organizeReview?.proposal.proposalId)
   const arrangement = useMemo(() => {
     if (!organizing) return null
-    try { return { plan: arrangeCanvas(allNodes, new Set(selected.map(node => node.id)), locale), error: '' } }
-    catch (error) { return { plan: null, error: describeError(error, locale) } }
-  }, [organizing, allNodes, selected.map(node => node.id).join(','), locale])
+    return planOrganize({ nodes: allNodes, mode: organizeMode, nodeIds: organizeIds,
+      columns: organizeColumns, removeEmptyFrames, titles: { uncategorized: cm.organizationUncategorized, untitledScript: m.untitledScript } })
+  }, [organizing, allNodes, organizeIds, organizeMode, organizeColumns, removeEmptyFrames, cm, m, organizeRefresh])
+  const { canScriptOrganize, canInPlaceOrganize } = useMemo(() => {
+    if (!organizing) return { canScriptOrganize: false, canInPlaceOrganize: false }
+    const selection = new Set(organizeIds)
+    const organizeItems = allNodes.filter(node => node.kind !== 'frame' && node.purpose !== 'working' && (!selection.size || selection.has(node.nodeId)))
+    return {
+      canScriptOrganize: organizeItems.some(node => node.shot && nodeViews.get(node.shot.scriptNodeId)?.kind === 'script'),
+      canInPlaceOrganize: selection.size > 0 && organizeItems.length >= 2,
+    }
+  }, [organizing, allNodes, nodeViews, organizeIds])
+  const dismissOrganizeProposal = async (proposal: OrganizeProposal) => {
+    if (!actions.onResolveOrganize || operationBusy) return
+    setOperationBusy(true)
+    setOperationError(null)
+    try {
+      await actions.onResolveOrganize({ proposalId: proposal.proposalId, action: 'dismiss' })
+      if (organizeReview?.proposal.proposalId === proposal.proposalId) setOrganizing(false)
+    } catch (error) { setOperationError({ error }) }
+    finally { setOperationBusy(false) }
+  }
+  const submitOrganize = async () => {
+    if (operationBusy || !arrangement?.ops.length || arrangement.tooLarge || arrangement.insufficientSelection) return
+    if (lockedOrganize ? !actions.onResolveOrganize || !reviewPending : !actions.onOrganize) return
+    setOperationBusy(true)
+    setOperationError(null)
+    try {
+      const preview = { removeEmptyFrames, titles: { uncategorized: cm.organizationUncategorized, untitledScript: m.untitledScript },
+        description: m.organizeCanvas, planDigest: organizePlanDigest(arrangement) }
+      if (lockedOrganize) {
+        await actions.onResolveOrganize!({ proposalId: organizeReview.proposal.proposalId, action: 'apply', ...preview })
+      } else {
+        await actions.onOrganize!({ mode: organizeMode, nodeIds: organizeIds, columns: organizeColumns, ...preview })
+      }
+      setOrganizing(false)
+      if (organizeReview?.detached && reviewPending) {
+        await actions.onResolveOrganize?.({ proposalId: organizeReview.proposal.proposalId, action: 'dismiss' })
+      }
+    } catch (error) {
+      setOrganizeRefresh(value => value + 1)
+      setOperationError({ error })
+    } finally { setOperationBusy(false) }
+  }
   const selectedId = selected.length === 1 ? selected[0]!.id : null
   const { pickingId, setPickingId, imagePick, pickImage } = useReferencePick()
   const [extendingId, setExtendingId] = useState<string | null>(null)
@@ -416,9 +532,13 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
   const [clipboard, setClipboard] = useState<NodeView[]>([])
   const [menu, setMenu] = useState<{ x: number; y: number; at: { x: number; y: number }; ids: string[] } | null>(null)
   const [submenu, setSubmenu] = useState(false)
+  const [frameColorsOpen, setFrameColorsOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const menuJobs = [...new Map((menu?.ids ?? []).flatMap(id => decorations?.get(id)?.activeJobs ?? []).map(job => [job.jobId, job])).values()]
   const menuNode = menu?.ids.length === 1 ? nodes.find(node => node.nodeId === menu.ids[0]) : undefined
+  const menuFrameFit = menuNode?.kind === 'frame' ? fitFrameOps(menuNode, allNodes) : []
+  const menuFrameHasMembers = menuNode?.kind === 'frame' && allNodes.some(node => node.frameId === menuNode.nodeId)
+  const frameColorNames: Record<FrameColor, string> = { gray: m.frameColorGray, blue: m.frameColorBlue, teal: m.frameColorTeal, green: m.frameColorGreen, amber: m.frameColorAmber, orange: m.frameColorOrange, red: m.frameColorRed, violet: m.frameColorViolet }
   const menuMedia = menuNode && wrapper.current?.querySelector<HTMLImageElement | HTMLVideoElement>(`[data-id="${CSS.escape(menuNode.nodeId)}"] .vis-version-media img:not(.is-previous), [data-id="${CSS.escape(menuNode.nodeId)}"] .vis-version-media > div:not(.is-previous) video`)
   const mediaWidth = menuMedia && menuMedia instanceof HTMLImageElement ? menuMedia.naturalWidth : menuMedia?.videoWidth
   const mediaHeight = menuMedia && menuMedia instanceof HTMLImageElement ? menuMedia.naturalHeight : menuMedia?.videoHeight
@@ -428,7 +548,7 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
   const mouse = useRef<{ x: number; y: number } | null>(null)
   const uploadAt = useRef<{ x: number; y: number } | null>(null)
   const pickingBusy = useRef(false)
-  const pendingCreate = useRef<{ kind: NodeKind; x: number; y: number; existing: Set<string> } | null>(null)
+  const pendingCreate = useRef<{ kind: NodeView['kind']; x: number; y: number; existing: Set<string> } | null>(null)
   // Fit the view only if nodes exist on opening; do not suddenly zoom in when creating the first node on an empty canvas
   const [fitOnOpen] = useState(() => nodes.length > 0)
   const [openedHidden] = useState(hidden)
@@ -461,7 +581,8 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
       navigationTarget.current = null
       pendingSelect.current = newNode.nodeId
       pendingCreate.current = null
-      void flow.setCenter(newNode.x + newNode.w / 2, newNode.y + newNode.h / 2, { zoom: flow.getZoom(), duration: 300 })
+      if (newNode.kind === 'frame') setEditingFrameId(newNode.nodeId)
+      else void flow.setCenter(newNode.x + newNode.w / 2, newNode.y + newNode.h / 2, { zoom: flow.getZoom(), duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 300 })
     }
     const nextSelected = pendingSelect.current
     if (nextSelected && nodes.some(node => node.nodeId === nextSelected)) pendingSelect.current = null
@@ -546,16 +667,34 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
 
   const dragStart = useRef<NodeView[]>([])
   const escapeDrag = useRef(false)
-  const dragMoves = (dragged: VisNode[]) => constrainedMoves(dragStart.current, dragged.map(n => ({ nodeId: n.id, ...n.position })), escapeDrag.current)
-  const dragBatch = (dragged: VisNode[]) => movedFrameBounds(dragStart.current, dragged.map(n => ({ nodeId: n.id, ...n.position })), escapeDrag.current)
+  const snapCandidates = useRef<SnapCandidates | null>(null)
+  const altDrag = useRef(false)
+  const rawDrag = useRef<VisNode[] | null>(null)
+  const dragLayout = (dragged: VisNode[]) => {
+    const roots = dragged.map(node => ({ nodeId: node.id, ...node.position, w: node.data.view.w, h: node.data.view.h }))
+    const bounds = selectionBounds(roots)
+    const snap = bounds && snapCandidates.current && !altDrag.current ? querySnap(bounds, snapCandidates.current, flow.getZoom()) : { dx: 0, dy: 0, guides: {} }
+    const moves = constrainedMoves(dragStart.current, roots.map(node => ({ nodeId: node.nodeId, x: Math.round(node.x + snap.dx), y: Math.round(node.y + snap.dy) })), escapeDrag.current)
+    const finalBounds = selectionBounds(roots.map(node => ({ ...node, ...moves.find(move => move.nodeId === node.nodeId)! })))
+    return { moves, guides: finalBounds ? matchingSnapLines(finalBounds, snap.guides) : {} }
+  }
+  const dragBatch = (dragged: VisNode[]) => movedFrameBounds(dragStart.current, dragLayout(dragged).moves, escapeDrag.current)
   const onNodeDragStop = useStableCallback((_: unknown, _node: VisNode, dragged: VisNode[]) => {
-    const batch = dragBatch(dragged).filter(l => {
+    const { moves } = dragLayout(rawDrag.current ?? dragged)
+    const finalLayouts = movedFrameBounds(dragStart.current, moves, escapeDrag.current)
+    const batch = finalLayouts.filter(l => {
       const old = dragStart.current.find(n => n.nodeId === l.nodeId)
       return old && (old.x !== l.x || old.y !== l.y)
     })
+    // React Flow's stop payload can retain its raw pointer position; commit the same snapped/clamped layout as the preview.
+    setFlowNodes(previous => moveFlowNodes(previous, new Map(finalLayouts.map(layout => [layout.nodeId, layout]))))
+    setDragging(false)
+    setSnapGuides({})
+    snapCandidates.current = null
+    rawDrag.current = null
     if (!batch.length) return
     for (const l of batch) pendingLayout.current.set(l.nodeId, { ...l, layoutRevision: dragStart.current.find(n => n.nodeId === l.nodeId)!.layoutRevision })
-    void (actions.onApply ? actions.onApply(memberMoveOps(dragStart.current, dragMoves(dragged)), m.moveNodes) : actions.onMove(frameMoveOps(dragStart.current, dragMoves(dragged)))).catch(() => {
+    void (actions.onApply ? actions.onApply(memberMoveOps(dragStart.current, moves), m.moveNodes) : actions.onMove(frameMoveOps(dragStart.current, moves))).catch(() => {
       for (const l of batch) pendingLayout.current.delete(l.nodeId)
       setFlowNodes(prev => prev.map(n => toFlowNode(n.data.view, undefined, Boolean(n.selected), n.data.deco, n)))
     })
@@ -601,7 +740,7 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
   const onResize = useStableCallback(commitLayout)
   const titleNumbers = useMemo(() => nodeTitleNumbers(nodes), [nodes])
   const frameRunning = useMemo(() => frameRunningStates(nodes, decorations), [nodes, decorations])
-  const ctx: CanvasContext = useShallowValue({ suspended, nodeViews, titleNumbers, decorations, frameRunning, selectNode, selectedPanel, selectPanel, assetUrl, posterUrl, thumbnailUrl, actions, scriptSessions, currentScriptSessionId, generationOperations, nodes, allNodes, selectedId: suspended || previewId ? null : selectedId, pickingId, setPickingId, pickImage, extendingId, extend: stableExtend, onResize, onDismissJobs, onDismissMediaTask })
+  const ctx: CanvasContext = useShallowValue({ suspended, nodeViews, titleNumbers, decorations, frameRunning, editingFrameId, editFrameTitle, saveFrameTitle, selectNode, selectedPanel, selectPanel, assetUrl, posterUrl, thumbnailUrl, actions, scriptSessions, currentScriptSessionId, generationOperations, nodes, allNodes, selectedId: suspended || previewId ? null : selectedId, pickingId, setPickingId, pickImage, extendingId, extend: stableExtend, onResize, onDismissJobs, onDismissMediaTask })
 
   const viewportCenter = () => {
     const rect = wrapper.current!.getBoundingClientRect()
@@ -664,13 +803,35 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
     const source = nodes.filter(node => node.kind !== 'frame' && ids.includes(node.nodeId))
     if (source.length) paste(source, { x: Math.min(...source.map(n => n.x)) + 40, y: Math.min(...source.map(n => n.y)) + 40 })
   }
+  const frameSelection = (ids: string[]) => {
+    if (!actions.onApply || operationBusy) return
+    const selection = frameSelectionBounds(allNodes.filter(node => ids.includes(node.nodeId)))
+    if (!selection) return
+    setOperationError(null)
+    if ('error' in selection) { setFrameHint(true); return }
+    setFrameHint(false)
+    const create = { op: 'frame.create' as const, tempId: `frame-${crypto.randomUUID()}`, title: m.frame, ...selection.bounds }
+    pendingCreate.current = { kind: 'frame', ...selection.bounds, existing: new Set(allNodes.map(node => node.nodeId)) }
+    void applyOperations(frameCreationOps(allNodes, create, selection.frameId), m.frameSelection).catch(() => { pendingCreate.current = null })
+  }
   useEffect(() => {
     if (suspended) return
     const keydown = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLElement && event.target.closest('.vis-tl-editor')) return
       if (event.key === 'Escape') { setMenu(null); return }
       if (deleteIds) return
-      if ((event.target as HTMLElement).closest('input, textarea') || (event.target as HTMLElement).isContentEditable) return
+      if (isEditing(event.target) || (event.target instanceof HTMLElement && event.target.isContentEditable)) return
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey
+          || event.target instanceof Element && event.target.closest('.nokey')) return
+        const ids = selected.map(node => node.id)
+        if (!ids.length) return
+        // React Flow tracks every held key by case-sensitive key values; a missed or differently cased keyup can block Delete.
+        event.preventDefault()
+        setMenu(null)
+        requestDelete(ids)
+        return
+      }
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return
       const ids = selected.map(n => n.id)
       switch (event.key.toLowerCase()) {
@@ -678,6 +839,10 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
         case 'c': if (!ids.length || window.getSelection()?.toString()) return; copy(ids); break
         case 'v': if (!clipboard.length) return; paste(clipboard, mouse.current ?? viewportCenter()); break
         case 'd': if (!ids.length) return; duplicate(ids); break
+        case 'g':
+          if (!(event.target instanceof globalThis.Node) || !wrapper.current?.contains(event.target)) return
+          frameSelection(ids)
+          break
         default: return
       }
       event.preventDefault()
@@ -694,7 +859,10 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
     const x = Math.max(4, Math.min(menu.x, window.innerWidth - rect.width - 4))
     const y = Math.max(4, Math.min(menu.y, window.innerHeight - rect.height - 4))
     if (x !== menu.x || y !== menu.y) setMenu({ ...menu, x, y })
-  }, [menu, submenu])
+  }, [menu, submenu, frameColorsOpen])
+  useEffect(() => {
+    if (frameColorsOpen) menuRef.current?.querySelector<HTMLButtonElement>('.vis-frame-colors button[aria-pressed="true"]')?.focus()
+  }, [frameColorsOpen])
   useEffect(() => {
     if (!menu) return
     const outside = (event: PointerEvent) => {
@@ -720,6 +888,7 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
     if (nodeId) setFlowNodes(prev => selectFlowNodes(prev, new Set(ids)))
     setPickingId(null)
     setSubmenu(false)
+    setFrameColorsOpen(false)
     const p = flow.screenToFlowPosition({ x: event.clientX, y: event.clientY })
     const at = { x: Math.round(p.x), y: Math.round(p.y) }
     mouse.current = at
@@ -741,14 +910,46 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
     navigationTarget.current = null
     setMenu(null)
   }, [])
-  const onNodeDragStart: OnNodeDrag<VisNode> = useStableCallback(event => {
+  const previewDrag = useStableCallback((dragged: VisNode[]) => {
+    const { moves, guides } = dragLayout(dragged)
+    const batch = new Map(movedFrameBounds(dragStart.current, moves, escapeDrag.current).map(layout => [layout.nodeId, layout]))
+    setFlowNodes(previous => moveFlowNodes(previous, batch))
+    setSnapGuides(guides)
+  })
+  useEffect(() => {
+    const modifier = (event: KeyboardEvent) => {
+      if (!snapCandidates.current || event.key !== 'Alt') return
+      // Read the key itself: Option keyup can report altKey=false before another pointer event arrives.
+      event.preventDefault()
+      altDrag.current = event.type === 'keydown'
+      if (rawDrag.current) previewDrag(rawDrag.current)
+    }
+    window.addEventListener('keydown', modifier)
+    window.addEventListener('keyup', modifier)
+    return () => {
+      window.removeEventListener('keydown', modifier)
+      window.removeEventListener('keyup', modifier)
+    }
+  }, [previewDrag])
+  const onNodeDragStart: OnNodeDrag<VisNode> = useStableCallback((event, _node, dragged) => {
     escapeDrag.current = event.metaKey || event.ctrlKey
+    altDrag.current = event.altKey
     dragStart.current = allNodes.map(node => ({ ...node, ...pendingLayout.current.get(node.nodeId) }))
+    const viewport = flow.getViewport()
+    const area = wrapper.current?.getBoundingClientRect()
+    snapCandidates.current = buildSnapCandidates(dragStart.current, dragged.map(node => node.id), {
+      x: -viewport.x / viewport.zoom, y: -viewport.y / viewport.zoom,
+      w: (area?.width ?? 0) / viewport.zoom, h: (area?.height ?? 0) / viewport.zoom,
+    }, new Set(nodes.map(node => node.nodeId)))
+    rawDrag.current = dragged
+    setDragging(true)
+    setMenu(null)
   })
   const onNodeDrag: OnNodeDrag<VisNode> = useStableCallback((event, _node, dragged) => {
     escapeDrag.current = event.metaKey || event.ctrlKey
-    const batch = new Map(dragBatch(dragged).map(layout => [layout.nodeId, layout]))
-    setFlowNodes(previous => moveFlowNodes(previous, batch))
+    altDrag.current = event.altKey
+    rawDrag.current = dragged
+    previewDrag(dragged)
   })
   const onNodeClick: NodeMouseHandler<VisNode> = useStableCallback((event, node) => {
     if (node.data.view.kind === 'frame') return
@@ -841,6 +1042,9 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
           onNodeDragStart={onNodeDragStart}
           onNodeDrag={onNodeDrag}
           onNodeDragStop={onNodeDragStop}
+          onSelectionDragStart={(event, dragged) => onNodeDragStart(event.nativeEvent, dragged[0]!, dragged)}
+          onSelectionDrag={(event, dragged) => onNodeDrag(event.nativeEvent, dragged[0]!, dragged)}
+          onSelectionDragStop={(event, dragged) => onNodeDragStop(event, dragged[0]!, dragged)}
           elevateNodesOnSelect={false}
           onNodeClick={onNodeClick}
           onSelectionChange={onSelectionChange}
@@ -859,13 +1063,20 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
           maxZoom={4}
           fitView={fitOnOpen && !openedHidden}
           fitViewOptions={OPEN_FIT_OPTIONS}
-          deleteKeyCode={suspended || deleteIds ? null : ['Backspace', 'Delete']}
+          deleteKeyCode={null}
           selectionKeyCode={suspended ? null : 'Shift'}
           multiSelectionKeyCode={suspended ? null : MODIFIER_KEYS}
           panActivationKeyCode={suspended ? null : 'Space'}
           zoomActivationKeyCode={suspended ? null : MODIFIER_KEYS}
           disableKeyboardA11y={suspended}
         >
+          {dragging && !suspended ? <SnapGuides guides={snapGuides} /> : null}
+          {selectionNodes.length >= 2 && !dragging && !suspended && !menu && !organizing && !categoryIds && !deleteIds && !help && !previewId ? <SelectionToolbar
+            selected={selectionNodes} nodes={nodes} busy={operationBusy || !actions.onApply}
+            tidyDisabled={!actions.onOrganize ? m.organizeNeedSelection : tidyPlan?.insufficientSelection ? m.organizeNeedSelection
+              : tidyPlan?.tooLarge ? m.organizeTooLarge(format.number(tidyPlan.tooLarge.count), format.number(tidyPlan.tooLarge.limit))
+              : !tidyPlan?.ops.length ? m.tidyNoChanges : null}
+            onAlign={alignSelection} onDistribute={distributeSelection} onTidy={() => void tidySelection()} /> : null}
           {!allNodes.length ? <EmptyShortcuts /> : null}
           <Panel position="bottom-center" className="vis-canvas-toolbar" data-canvas-obstacle="bottom">
             <button aria-label={m.importWriting} title={m.importWriting} disabled={!actions.onImportWriting} onClick={() => actions.onImportWriting?.(flow.screenToFlowPosition({ x: (wrapper.current?.getBoundingClientRect().left ?? 0) + (wrapper.current?.clientWidth ?? 0) / 2, y: (wrapper.current?.getBoundingClientRect().top ?? 0) + (wrapper.current?.clientHeight ?? 0) / 2 }))}><Icon kind="text" /></button>
@@ -877,7 +1088,7 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
             <button aria-label={m.generateImage} title={m.generateImage} onClick={() => createAtCenter('image')}><Icon kind="image" /></button>
             <button aria-label={m.generateAudio} title={m.generateAudio} onClick={() => createAtCenter('audio')}><Icon kind="audio" /></button>
             <button aria-label={m.generateVideo} title={m.generateVideo} onClick={() => createAtCenter('video')}><Icon kind="video" /></button>
-            <button title={m.organize} aria-label={m.organize} disabled={!nodes.length || !actions.onApply} onClick={() => { setOperationError(null); setRemoveEmptyFrames(true); setOrganizing(true) }}><Icon kind="organize" /></button>
+            <button title={m.organize} aria-label={m.organize} disabled={!nodes.length || !actions.onOrganize} onClick={() => { setOperationError(null); setRemoveEmptyFrames(true); setOrganizeMode('category'); setOrganizeColumns('auto'); setOrganizeReview(null); setOrganizing(true) }}><Icon kind="organize" /></button>
             <button className="vis-working-toggle" aria-label={m.showWorking} title={m.showWorking} aria-pressed={showWorking} onClick={() => {
               setShowWorking(!showWorking)
               try { localStorage.setItem('vis.canvas.working', !showWorking ? 'shown' : 'hidden') } catch {}
@@ -904,19 +1115,39 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
           </Panel>
           {pickingId ? <Panel position="top-center" className="vis-reference-hint" role="status">{m.pickReference}</Panel> : null}
         </ReactFlow>
+        {!suspended && !hidden && organizeProposals?.length ? <OrganizeProposalBar proposals={organizeProposals} sessionTitles={organizeSessionTitles}
+          busy={operationBusy || !actions.onResolveOrganize} onPreview={openOrganizeProposal} onDismiss={proposal => void dismissOrganizeProposal(proposal)} /> : null}
         {operationError && !organizing && !categoryIds ? <div role="alert" className="vis-organization-error">{describeError(operationError.error, locale)}<button onClick={() => setOperationError(null)}>{m.close}</button></div> : null}
+        {frameHint ? <div role="alert" className="vis-organization-error"><span>{m.frameAcrossFrames}</span><button onClick={() => setFrameHint(false)}>{m.close}</button></div> : null}
         {help ? <ShortcutDialog onClose={() => setHelp(false)} onRestoreFocus={() => wrapper.current?.focus()} /> : null}
         <dialog ref={organizeDialog} className="vis-dialog vis-frame-delete vis-organize-dialog" aria-label={m.organizeCanvas} onCancel={() => setOrganizing(false)} onClick={event => { if (event.target === event.currentTarget) setOrganizing(false) }}>
           <header className="vis-dialog-header"><h2>{m.organizeCanvas}</h2><IconButton label={m.close} onClick={() => setOrganizing(false)}><CloseIcon /></IconButton></header>
           <div className="vis-dialog-body">
-            <p>{m.organizeHint(Boolean(selected.length))}</p>
-            {arrangement?.plan ? <><OrganizationPreview {...arrangement.plan} nodes={allNodes} />
-              {arrangement.plan.removedFrames.length ? <label className="vis-organize-removals"><input type="checkbox" checked={removeEmptyFrames} onChange={event => setRemoveEmptyFrames(event.target.checked)} />{m.removeEmptyFrames}<ul>{arrangement.plan.removedFrames.map(frame => <li key={frame.nodeId}>{frame.title}</li>)}</ul></label> : null}</> : null}
-            {arrangement?.error || operationError ? <p role="alert">{arrangement?.error || (operationError && describeError(operationError.error, locale))}</p> : null}
+            <p>{m.organizeHint(Boolean(organizeIds?.length))}</p>
+            {lockedOrganize ? <p className="vis-organize-proposal-reason">{organizeReview.proposal.reason}</p> : null}
+            <fieldset className="vis-organize-modes"><legend>{m.organizeMode}</legend>
+              {(['category', 'script', 'inPlace'] as const).map(mode => <label key={mode}><input type="radio" name="organize-mode" checked={organizeMode === mode}
+                disabled={operationBusy || mode === 'script' && !canScriptOrganize || mode === 'inPlace' && !canInPlaceOrganize}
+                onChange={() => { setOrganizeMode(mode); setOrganizeReview(review => editOrganizeReview(review, mode, organizeColumns)); setOperationError(null) }} />{{ category: m.organizeCategory, script: m.organizeScript, inPlace: m.organizeInPlace }[mode]}
+                {mode === 'script' && !canScriptOrganize ? <small>{m.organizeNoLinked}</small> : mode === 'inPlace' && !canInPlaceOrganize ? <small>{m.organizeNeedSelection}</small> : null}</label>)}
+            </fieldset>
+            <label className="vis-organize-columns">{m.organizeColumns}<select aria-label={m.organizeColumns} value={organizeColumns} disabled={operationBusy || organizeMode === 'script' && !organizeReview}
+              onChange={event => { const columns = event.target.value === 'auto' ? 'auto' : Number(event.target.value); setOrganizeColumns(columns); setOrganizeReview(review => editOrganizeReview(review, organizeMode, columns)); setOperationError(null) }}>
+              <option value="auto">{m.organizeAuto}</option>{Array.from({ length: 8 }, (_, index) => <option key={index} value={index + 1}>{format.number(index + 1)}</option>)}
+            </select></label>
+            {arrangement ? <><OrganizationPreview {...arrangement} nodes={allNodes} />
+              {organizeMode === 'script' && arrangement.untouched.length ? <div><p>{m.organizeUntouched(format.number(arrangement.untouched.length))}</p><ul>{arrangement.untouched.map(id => <li key={id}>{allNodes.find(node => node.nodeId === id)?.title || id}</li>)}</ul></div> : null}
+              <label className="vis-organize-removals"><input type="checkbox" checked={removeEmptyFrames} disabled={operationBusy} onChange={event => setRemoveEmptyFrames(event.target.checked)} />{m.removeEmptyFrames}</label>
+              {arrangement.removedFrames.length ? <ul>{arrangement.removedFrames.map(frame => <li key={frame.nodeId}>{frame.title}</li>)}</ul> : null}
+              {arrangement.tooLarge ? <p role="alert">{m.organizeTooLarge(format.number(arrangement.tooLarge.count), format.number(arrangement.tooLarge.limit))}</p> : null}
+              {arrangement.insufficientSelection ? <p role="alert">{m.organizeNeedSelection}</p> : null}</> : null}
+            {lockedOrganize && (!arrangement?.ops.length || arrangement.insufficientSelection) ? <p role="status">{om.empty}</p> : null}
+            {lockedOrganize && !reviewPending ? <p role="status">{om.closed}</p> : null}
+            {operationError ? <p role="alert">{describeError(operationError.error, locale)}</p> : null}
           </div>
-          <footer className="vis-dialog-footer"><button onClick={() => setOrganizing(false)}>{m.cancel}</button><button className="is-primary" disabled={operationBusy || !arrangement?.plan?.ops.some(op => removeEmptyFrames || op.op !== 'node.delete')} onClick={() => {
-            if (arrangement?.plan) void applyOperations(arrangement.plan.ops.filter(op => removeEmptyFrames || op.op !== 'node.delete'), m.organizeByCategory).then(() => setOrganizing(false)).catch(() => {})
-          }}>{m.confirmOrganize}</button></footer>
+          <footer className="vis-dialog-footer">{lockedOrganize && (!arrangement?.ops.length || arrangement.insufficientSelection)
+            ? <button disabled={operationBusy || !reviewPending} onClick={() => void dismissOrganizeProposal(organizeReview.proposal)}>{om.dismiss}</button>
+            : <><button onClick={() => setOrganizing(false)}>{m.cancel}</button><button className="is-primary" disabled={operationBusy || !arrangement?.ops.length || !!arrangement?.tooLarge || !!arrangement?.insufficientSelection || !!lockedOrganize && !reviewPending} onClick={() => void submitOrganize()}>{m.confirmOrganize}</button></>}</footer>
         </dialog>
         <dialog ref={categoryDialog} className="vis-dialog vis-frame-delete" aria-label={m.setCategory} onCancel={() => setCategoryIds(null)} onClick={event => { if (event.target === event.currentTarget && category === (nodes.find(node => node.nodeId === categoryIds?.[0])?.category ?? '')) setCategoryIds(null) }}>
           <header className="vis-dialog-header"><h2>{m.setCategory}</h2><IconButton label={m.close} onClick={() => setCategoryIds(null)}><CloseIcon /></IconButton></header>
@@ -940,14 +1171,27 @@ const Canvas = memo(function Canvas({ nodes: allNodes, nodeViews, decorations, o
         </dialog>
         {!suspended && previewId && nodes.find(n => n.nodeId === previewId && mediaSlot(n)) ? <NodePreview key={previewId} running={Boolean(decorations?.get(previewId)?.running)} view={nodes.find(n => n.nodeId === previewId)!} origin={previewOrigin.current} onSelect={selectPreview} onClose={closePreview} /> : null}
         {menu ? <div ref={menuRef} role="menu" aria-label={m.contextMenu} className="vis-context-menu" style={{ left: menu.x, top: menu.y }} onContextMenu={e => e.preventDefault()} onKeyDown={event => {
-          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+          if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
           event.preventDefault()
+          event.stopPropagation()
           const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
           const index = items.indexOf(document.activeElement as HTMLButtonElement)
-          items[event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus()
+          items[event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length]?.focus()
         }}>
           {menu.ids.length ? <>
             {actions.onApply ? <>
+              {menu.ids.some(id => nodes.some(node => node.nodeId === id && node.kind !== 'frame')) ? <button role="menuitem" disabled={operationBusy} onClick={() => menuAction(() => frameSelection(menu.ids))}>{m.frameSelection}<kbd>{MOD}G</kbd></button> : null}
+              {menuNode?.kind === 'frame' ? <>
+                <button role="menuitem" onClick={() => menuAction(() => editFrameTitle(menuNode.nodeId))}>{m.renameFrame}</button>
+                <button role="menuitem" aria-haspopup="menu" aria-expanded={frameColorsOpen} onClick={() => setFrameColorsOpen(!frameColorsOpen)}>{m.frameColor}<ChevronRightIcon /></button>
+                {frameColorsOpen ? <div role="menu" aria-label={m.frameColor} className="vis-context-submenu vis-frame-colors">
+                  {(Object.keys(FRAME_COLORS) as FrameColor[]).map(color => <button key={color} aria-label={frameColorNames[color]} aria-pressed={(menuNode.frame?.color ?? 'gray') === color} style={{ '--frame-color': FRAME_COLORS[color] } as CSSProperties} onClick={() => menuAction(() => {
+                    if (color !== (menuNode.frame?.color ?? 'gray')) void applyOperations([{ op: 'frame.update', nodeId: menuNode.nodeId, color }], m.frameColor).catch(() => {})
+                  })}><span aria-hidden="true" />{frameColorNames[color]}</button>)}
+                </div> : null}
+                {menuFrameHasMembers ? <button role="menuitem" disabled={!menuFrameFit.length || operationBusy} onClick={() => menuAction(() => { void applyOperations(menuFrameFit, m.fitFrame).catch(() => {}) })}>{m.fitFrame}</button> : null}
+                <hr />
+              </> : null}
               <button role="menuitem" onClick={() => { setCategoryIds(menu.ids); setCategory(menuNode?.category ?? ''); setOperationError(null); setMenu(null) }}>{m.setCategoryMenu}</button>
               <button role="menuitem" onClick={() => menuAction(() => { void applyOperations(menu.ids.map(nodeId => ({ op: 'node.setMeta', nodeId, purpose: menuNode?.purpose === 'working' ? 'artifact' : 'working' })), m.setPurpose).catch(() => {}) })}>{menuNode?.purpose === 'working' ? m.markArtifact : m.markWorking}</button>
               {menuNode?.frameId ? <button role="menuitem" onClick={() => menuAction(() => { void applyOperations(leaveFrameOps(menuNode, allNodes), m.leaveFrame).catch(() => {}) })}>{m.leaveFrame}</button> : null}
@@ -1433,10 +1677,39 @@ const MediaNode = memo(function MediaNode({ id, data, selected }: NodeProps<VisN
   )
 })
 
+function FrameTitleEditor({ title, onSave, onCancel }: { title: string; onSave(title: string): Promise<void>; onCancel(): void }) {
+  const m = useMessages(messages)
+  const [draft, setDraft] = useState(title)
+  const [busy, setBusy] = useState(false)
+  const input = useRef<HTMLInputElement>(null)
+  const finished = useRef(false)
+  useLayoutEffect(() => { input.current?.focus(); input.current?.select() }, [])
+  const save = async () => {
+    if (finished.current) return
+    const value = draft.trim()
+    if (!value || value === title) { finished.current = true; onCancel(); return }
+    if (value.length > 60) return
+    finished.current = true
+    setBusy(true)
+    try { await onSave(value) }
+    catch { finished.current = false; setBusy(false) }
+  }
+  return <input ref={input} className="vis-frame-title-input nodrag nopan" aria-label={m.frameTitle} value={draft} maxLength={60} disabled={busy}
+    onChange={event => setDraft(event.target.value)} onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
+    onBlur={() => void save()} onKeyDown={event => {
+      event.stopPropagation()
+      if (event.nativeEvent.isComposing) return
+      if (event.key === 'Escape') { event.preventDefault(); finished.current = true; onCancel() }
+      if (event.key === 'Enter') { event.preventDefault(); void save() }
+      if (event.key === 'Escape' || event.key === 'Enter') event.currentTarget.closest<HTMLElement>('.vis-canvas-wrap')?.focus()
+    }} />
+}
+
 const FrameNode = memo(function FrameNode({ id, data, selected }: NodeProps<VisNode>) {
   const m = useMessages(messages)
-  const { running, onResize } = useCanvasSelector(state => ({
+  const { running, onResize, editing, editFrameTitle, saveFrameTitle, canRename } = useCanvasSelector(state => ({
     running: state.frameRunning.get(id) ?? false, onResize: state.onResize,
+    editing: state.editingFrameId === id, editFrameTitle: state.editFrameTitle, saveFrameTitle: state.saveFrameTitle, canRename: Boolean(state.actions.onApply),
   }), [id])
   const zoom = useStore(zoomSelector)
   return <div className={`vis-frame${selected ? ' is-selected' : ''}${running ? ' is-generating' : ''}`} style={{ '--frame-color': FRAME_COLORS[data.view.frame?.color ?? 'gray'] } as CSSProperties}>
@@ -1444,7 +1717,8 @@ const FrameNode = memo(function FrameNode({ id, data, selected }: NodeProps<VisN
       onResizeEnd={(_, p) => onResize(id, { x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.width), h: Math.round(p.height) })} />
     {/* Grow the enlarged title upward, out of the frame: member cards render above frames and would hide its lower part. */}
     <div className="vis-frame-header" style={zoom < 0.35 ? { transform: `scale(${1 / zoom})`, transformOrigin: 'bottom left', width: 'max-content', maxWidth: data.view.w * zoom, background: 'var(--vis-panel)' } : undefined}>
-      <strong>{data.view.frame?.title ?? m.frame}</strong>
+      {editing ? <FrameTitleEditor title={data.view.frame?.title ?? m.frame} onSave={title => saveFrameTitle(id, title)} onCancel={() => editFrameTitle(null)} />
+        : <strong onDoubleClick={event => { if (!canRename) return; event.stopPropagation(); editFrameTitle(id) }}>{data.view.frame?.title ?? m.frame}</strong>}
     </div>
   </div>
 })
@@ -1475,6 +1749,8 @@ export function selectCanvasNode(state: CanvasContext, history: SlotVersionView[
     view, decoration: state.decorations?.get(id), suspended: state.suspended,
     history,
     ordinal: state.titleNumbers.get(id), running: state.frameRunning.get(id) ?? false,
+    editingFrameId: kind === 'frame' && state.editingFrameId === id ? id : null,
+    editFrameTitle: state.editFrameTitle, saveFrameTitle: state.saveFrameTitle,
     selectNode: state.selectNode, selectedPanel: selected ? state.selectedPanel : null, selectPanel: state.selectPanel, assetUrl: state.assetUrl, posterUrl: state.posterUrl, thumbnailUrl: state.thumbnailUrl, actions: state.actions,
     setPickingId: state.setPickingId, pickImage: state.pickImage, extend: state.extend, onResize: state.onResize,
     onDismissJobs: state.onDismissJobs, onDismissMediaTask: state.onDismissMediaTask,

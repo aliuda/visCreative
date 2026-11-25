@@ -1,6 +1,6 @@
 // space.db schema; see docs/rfc/0002-sqlite-storage.md. Run `pnpm --filter @vis/storage db:generate` after schema changes.
 import { sql } from 'drizzle-orm'
-import type { SceneChange, TextProposalEdit, PrevizDoc, SceneDoc, AssetLabelField, BatchView, EntityKind, EntityMemberRole, EntityProposalInput, EntityRef, FrameView, GenerationOperation, LocalOperation, MediaTaskView, NodeGeneration, ScriptDoc, ShotLink, ExportOf, TimelineDoc, WorkActor, WorkMessageFrom, WorkRefs } from '@vis/protocol'
+import type { OrganizeColumns, OrganizeMode, SceneChange, TextProposalEdit, PrevizDoc, SceneDoc, AssetLabelField, BatchView, EntityKind, EntityMemberRole, EntityProposalInput, EntityRef, FrameView, GenerationOperation, LocalOperation, MediaTaskView, NodeGeneration, ScriptDoc, ShotLink, ExportOf, TimelineDoc, WorkActor, WorkMessageFrom, WorkRefs } from '@vis/protocol'
 import {
   type AnySQLiteColumn,
   check,
@@ -583,3 +583,19 @@ export const sceneProposals = sqliteTable('scene_proposals', {
   status: text('status', { enum: ['open', 'resolved'] }).notNull(),
   createdAt: integer('created_at').notNull(),
 }, t => [index('scene_proposals_slot_status').on(t.slotId, t.status), index('scene_proposals_status_slot').on(t.status, t.slotId)])
+
+// -- Canvas organize proposals (0052) -------------------------------
+// Request fingerprints and saved results live in idempotency_keys, as for scene proposals.
+export const organizeProposals = sqliteTable('organize_proposals', {
+  id: text('id').primaryKey(),
+  sessionId: text('session_id').notNull().references(() => sessions.id),
+  mode: text('mode').$type<OrganizeMode>().notNull(),
+  nodeIds: text('node_ids', { mode: 'json' }).$type<string[]>(),
+  columns: text('columns', { mode: 'json' }).$type<OrganizeColumns>().notNull(),
+  reason: text('reason').notNull(),
+  changed: integer('changed').notNull(),
+  status: text('status', { enum: ['pending', 'applied', 'dismissed', 'stale', 'superseded', 'expired'] }).notNull(),
+  createdAt: integer('created_at').notNull(),
+  resolvedAt: integer('resolved_at'),
+  operationId: text('operation_id').references(() => operations.id),
+}, t => [index('organize_proposals_status_created').on(t.status, t.createdAt, t.id), index('organize_proposals_session_status').on(t.sessionId, t.status)])

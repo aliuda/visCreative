@@ -35,12 +35,13 @@ const profiles: Record<string, VideoEncoder> = {
 const detections = new Map<string, Promise<VideoEncoder>>()
 
 /** Cache the trial as well as its result so simultaneous exports never probe twice. */
-export function detectVideoEncoder(opts: { ffmpegPath?: string; platform?: NodeJS.Platform; exec?: EncoderRunner; priority?: readonly string[] } = {}): Promise<VideoEncoder> {
+export function detectVideoEncoder(opts: { ffmpegPath?: string; platform?: NodeJS.Platform; exec?: EncoderRunner; priority?: readonly string[]; output?: { width: number; height: number; fps: number } } = {}): Promise<VideoEncoder> {
   const ffmpeg = opts.ffmpegPath ?? 'ffmpeg'
-  const key = JSON.stringify([ffmpeg, opts.priority ?? null])
+  const output = opts.output ?? { width: 256, height: 256, fps: 30 }
+  const key = JSON.stringify([ffmpeg, opts.priority ?? null, output.width, output.height, output.fps])
   const existing = detections.get(key)
   if (existing) return existing
-  const detection = detect(ffmpeg, opts.platform ?? process.platform, opts.exec ?? execute, opts.priority).catch(error => {
+  const detection = detect(ffmpeg, opts.platform ?? process.platform, opts.exec ?? execute, opts.priority, output).catch(error => {
     if (detections.get(key) === detection) detections.delete(key)
     throw error
   })
@@ -48,7 +49,7 @@ export function detectVideoEncoder(opts: { ffmpegPath?: string; platform?: NodeJ
   return detection
 }
 
-async function detect(ffmpeg: string, platform: NodeJS.Platform, exec: EncoderRunner, priority?: readonly string[]): Promise<VideoEncoder> {
+async function detect(ffmpeg: string, platform: NodeJS.Platform, exec: EncoderRunner, priority: readonly string[] | undefined, output: { width: number; height: number; fps: number }): Promise<VideoEncoder> {
   let detail = ''
   try {
     const { stdout } = await exec(ffmpeg, ['-hide_banner', '-encoders'], { timeoutMs: 5000 })
@@ -59,8 +60,8 @@ async function detect(ffmpeg: string, platform: NodeJS.Platform, exec: EncoderRu
       try {
         await exec(ffmpeg, [
           '-hide_banner', '-v', 'error', '-nostdin', ...(encoder.inputArgs ?? []),
-          // Hardware encoders reject tiny frames (NVENC: 'Frame Dimension less than the minimum'), so a too-small trial would skip a working GPU
-          '-f', 'lavfi', '-i', 'color=black:size=256x256:rate=30',
+          // Device/driver limits vary. Export trials must use the resolved frame, including implicit phone rotation.
+          '-f', 'lavfi', '-i', `color=black:size=${output.width}x${output.height}:rate=${output.fps}`,
           '-frames:v', '1', ...(encoder.filter ? ['-vf', encoder.filter] : []),
           '-c:v', encoder.name, ...encoder.args, '-f', 'null', '-',
         ], { timeoutMs: 5000 })

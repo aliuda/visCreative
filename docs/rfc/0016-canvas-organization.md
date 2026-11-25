@@ -32,6 +32,8 @@
 
 ### 2. 摆放：不再重叠
 
+**Note (2026-11-25):** [RFC 0052](0052-canvas-layout.md) supersedes the Organize grid and 200-op limit below with three modes, selectable columns and server-side organization of up to 1000 affected nodes.
+
 **服务端创建时找空位。** `canvas.apply` 的节点创建若没给位置，或给的位置与已有节点重叠，由画布服务（`placement.ts`）选位置：
 
 - 有来源 / 参考节点时，放在它们右侧，按 `freePosition` 的间隔避开重叠；
@@ -48,6 +50,8 @@ Agent 显式给了位置且不重叠时尊重它；重叠时挪开。用户显�
 - 一次整理是一个可撤销批次（沿用现有撤销 / 重做），只生成 `node.layout` / `frame.*` 操作，不改内容与类别；
 - 选中若干节点时只整理选中的部分；此时保留未选节点与已有框的位置优先于「上游一定在左」。
 - 一次整理最多 200 个操作，超过时提示缩小选择。
+
+**Reading-order correction (2026-11-24).** Members within each category keep their current reading order in absolute canvas coordinates: rows from top to bottom, then left to right, with node IDs breaking ties. A row includes top edges within half of `NODE_GAP` (40 pixels) of its first, topmost member, tolerating small hand-placement differences. Organizing an already organized canvas changes nothing, including selected-only organization and grids with mixed media heights.
 
 整理是用户主动触发的动作，不自动运行，避免打乱用户刚摆好的位置。
 

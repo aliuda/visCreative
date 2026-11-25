@@ -16,6 +16,7 @@ import { issueAgentToken } from './auth'
 import type { AgentRuntimeFactory } from './space-host'
 import { startStudiod, type Studiod, type StudiodOptions, StudiodRunningError } from './studiod'
 import * as filesystem from './filesystem'
+import { planOrganize, organizePlanDigest } from '../../../packages/canvas/layout/src/index'
 
 type Dispatched = DispatchInput & { token: string; instanceId: string; report: (e: AgentEvent) => void; stream: (e: TransientEvent) => void; requestApproval: RequestApproval; end(): void }
 
@@ -143,6 +144,47 @@ async function agent(token: string) {
   return c
 }
 
+it('canvas.organize applies once for UI, reports plan errors, and refuses Agent calls', async () => {
+  const c = await ui()
+  let a: Awaited<ReturnType<typeof agent>> | undefined
+  const options = { mode: 'category' as const, columns: 'auto' as const, removeEmptyFrames: true,
+    titles: { uncategorized: 'Uncategorized', untitledScript: 'Untitled script' } }
+  try {
+    await c.call('events.subscribe', { spaceId })
+    await expect(c.call('canvas.organize', { ...options, requestId: 'empty-organize', planDigest: 'empty' })).rejects.toMatchObject({
+      code: 'invalid_params', rpc: { data: { reason: 'canvas.organize_nothing' } },
+    })
+    await c.call('canvas.apply', { requestId: 'organize-seed', ops: [{ op: 'node.create', tempId: 'image', kind: 'image' }] })
+    const before = await c.call('canvas.get')
+    const params = { ...options, requestId: 'organize-success', description: 'Organize canvas', planDigest: organizePlanDigest(planOrganize({ ...options, nodes: before.nodes })) }
+    await expect(c.call('canvas.organize', { ...params, requestId: 'changed-organize', planDigest: 'wrong' })).rejects.toMatchObject({
+      code: 'revision_conflict', rpc: { data: { reason: 'canvas.organize_plan_changed' } },
+    })
+    const result = await c.call('canvas.organize', params)
+    expect(result).toMatchObject({ operationId: params.requestId, changed: 2 })
+    expect(await c.call('canvas.organize', params)).toEqual(result)
+    const after = await c.call('canvas.get')
+    await c.call('canvas.undo', { requestId: 'undo-organize' })
+    expect((await c.call('canvas.get')).nodes.map((node: any) => node.nodeId)).toEqual(before.nodes.map((node: any) => node.nodeId))
+    await c.call('canvas.redo', { requestId: 'redo-organize' })
+    expect((await c.call('canvas.get')).nodes.map((node: any) => [node.nodeId, node.x, node.y])).toEqual(after.nodes.map((node: any) => [node.nodeId, node.x, node.y]))
+    const host = studiod.spaces.get(spaceId)!
+    host.db.transaction(tx => {
+      for (let index = 0; index < 1001; index++) tx.insert(s.nodes).values({ id: `bulk-${index}`, kind: 'image', x: 0, y: 0, w: 320, h: 320, z: 0, createdAt: 1 }).run()
+    })
+    await expect(c.call('canvas.organize', { ...params, requestId: 'large-organize' })).rejects.toMatchObject({
+      code: 'invalid_params', rpc: { data: { reason: 'canvas.organize_too_large', params: { count: 1003, limit: 1000 } } },
+    })
+    const { sessionId } = await c.call('session.create', { requestId: 'organize-session' })
+    await c.call('session.sendMessage', { requestId: 'organize-turn', sessionId, text: 'Inspect canvas', refs: [] })
+    await until(() => dispatched.some(turn => turn.sessionId === sessionId))
+    a = await agent(dispatched.find(turn => turn.sessionId === sessionId)!.token)
+    await expect(a.call('canvas.organize', params)).rejects.toMatchObject({
+      code: 'forbidden', rpc: { data: { reason: 'runtime.caller_forbidden', params: { method: 'canvas.organize', caller: 'agent' } } },
+    })
+  } finally { a?.close(); c.close() }
+})
+
 it('allows UI asset path resolution and rejects Agent callers at the method registry boundary', async () => {
   const c = await ui()
   let a: Awaited<ReturnType<typeof agent>> | undefined
@@ -171,6 +213,117 @@ const until = async (check: () => boolean, ms = 2000) => {
 
 let req = 0
 const rid = () => `req_${++req}`
+
+describe('Agent organize proposals and layout protection', () => {
+  async function setup(child = false) {
+    const c = await ui()
+    await c.call('events.subscribe', { spaceId })
+    const session = await c.call('session.create', { requestId: rid() })
+    await c.call('session.sendMessage', { requestId: rid(), sessionId: session.sessionId, text: 'Prepare results', refs: [] })
+    await until(() => dispatched.some(turn => turn.sessionId === session.sessionId))
+    let turn = dispatched.find(turn => turn.sessionId === session.sessionId)!
+    if (child) {
+      const work = (await c.call('work.dispatch', { requestId: rid(), parentId: session.workItemId, title: 'Result batch', brief: 'Prepare results', agentKind: 'codex' })).item
+      await until(() => dispatched.some(turn => turn.sessionId === work.sessions[0].sessionId))
+      turn = dispatched.find(turn => turn.sessionId === work.sessions[0].sessionId)!
+    }
+    const a = await agent(turn.token)
+    const host = studiod.spaces.get(spaceId)!
+    const created = await c.call('canvas.apply', { requestId: rid(), ops: [
+      { op: 'node.create', tempId: 'image', kind: 'image', x: 400, y: 400 },
+      { op: 'frame.create', tempId: 'frame', title: 'Results', x: -1000, y: -1000, w: 500, h: 500 },
+    ] })
+    return { c, a, host, session, turn, nodeId: created.idMap.image as string, frameId: created.idMap.frame as string }
+  }
+
+  it.each(['ordinary', 'scene', 'child-text', 'child-scene'] as const)('guards the %s Agent apply route inside the write transaction and preserves replay', async route => {
+    const f = await setup(route.startsWith('child'))
+    try {
+      const scene = route.includes('scene')
+      const ops: CanvasOp[] = [
+        { op: 'node.create', tempId: 'fresh', kind: scene ? 'scene' : 'text', content: scene ? undefined : { text: 'New result' } },
+        { op: 'node.layout', nodeId: f.nodeId, x: 900 },
+      ]
+      const before = f.host.canvas.get({})
+      const seq = currentSeq(f.host.db)
+      const requestId = rid()
+      await expect(f.a.call('canvas.apply', { requestId, ops })).rejects.toMatchObject({
+        code: 'forbidden', rpc: { data: { reason: 'canvas.layout_protected', params: { nodeId: f.nodeId } } },
+      })
+      expect(f.host.canvas.get({})).toEqual(before)
+      expect(currentSeq(f.host.db)).toBe(seq)
+      expect(f.host.db.select().from(s.idempotencyKeys).where(eq(s.idempotencyKeys.requestId, requestId)).get()).toBeUndefined()
+      await expect(f.a.call('canvas.apply', { requestId: rid(), ops: [{ op: 'frame.move', nodeId: f.frameId, dx: 10, dy: 10 }] })).rejects.toMatchObject({
+        rpc: { data: { reason: 'canvas.layout_protected', params: { nodeId: f.frameId } } },
+      })
+      const allowed = { requestId: rid(), ops: [ops[0]!, { op: 'node.layout', nodeId: 'fresh', x: 1600, y: 1600 }, { op: 'node.layout', nodeId: f.nodeId, z: 20 }] }
+      const result = await f.a.call('canvas.apply', allowed)
+      expect(await f.a.call('canvas.apply', allowed)).toEqual(result)
+      expect(f.host.canvas.get({ nodeIds: [result.idMap.fresh] }).nodes[0]).toMatchObject({ x: 1600, y: 1600, ...(route === 'child-text' ? { purpose: 'working' } : {}) })
+      const legacy = { requestId: rid(), ops: [{ op: 'node.layout' as const, nodeId: f.nodeId, x: 700 }] }
+      const earlier = f.host.canvas.apply({ kind: 'agent', sessionId: f.turn.sessionId }, legacy)
+      await f.c.call('canvas.apply', { requestId: rid(), ops: [{ op: 'node.layout', nodeId: f.nodeId, x: 800 }] })
+      expect(await f.a.call('canvas.apply', legacy)).toEqual(earlier)
+      expect(f.host.canvas.get({ nodeIds: [f.nodeId] }).nodes[0]!.x).toBe(800)
+    } finally { f.a.close(); f.c.close() }
+  })
+
+  it('lists proposals to both callers, requires an active linked session, and accepts only the author preview', async () => {
+    const f = await setup()
+    try {
+      const params = { requestId: rid(), mode: 'category', columns: 'auto', reason: 'The finished results overlap.' }
+      const proposal = await f.a.call('canvas.organize.propose', params)
+      expect(await f.a.call('canvas.organize.propose', params)).toEqual(proposal)
+      expect(await f.a.call('canvas.organize.proposals', {})).toEqual({ proposals: [proposal] })
+      expect(await f.c.call('canvas.organize.proposals', {})).toEqual({ proposals: [proposal] })
+      await expect(f.c.call('canvas.organize.propose', { ...params, requestId: rid() })).rejects.toMatchObject({ code: 'forbidden' })
+      const options = { mode: proposal.mode, nodeIds: proposal.nodeIds, columns: proposal.columns, removeEmptyFrames: true,
+        titles: { uncategorized: 'Other results', untitledScript: 'Script' } }
+      const resolve = { requestId: rid(), proposalId: proposal.proposalId, action: 'apply', removeEmptyFrames: true,
+        titles: options.titles, planDigest: organizePlanDigest(planOrganize({ ...options, nodes: f.host.canvas.get({}).nodes })) }
+      expect(await f.c.call('canvas.organize.resolve', resolve)).toMatchObject({ proposal: { status: 'applied' }, operationId: resolve.requestId })
+      const blocked = async (reason: string) => {
+        await expect(f.a.call('canvas.organize.propose', { ...params, requestId: rid() })).rejects.toMatchObject({ code: 'forbidden', rpc: { data: { reason } } })
+      }
+      f.host.db.update(s.sessions).set({ workItemId: null }).where(eq(s.sessions.id, f.session.sessionId)).run()
+      await blocked('runtime.work_item_required')
+      f.host.db.update(s.sessions).set({ workItemId: f.session.workItemId }).where(eq(s.sessions.id, f.session.sessionId)).run()
+      f.host.db.update(s.workItems).set({ status: 'todo' }).where(eq(s.workItems.id, f.session.workItemId)).run()
+      await blocked('work.execution_forbidden')
+      f.host.db.update(s.workItems).set({ status: 'in_progress' }).where(eq(s.workItems.id, f.session.workItemId)).run()
+      f.host.db.update(s.sessions).set({ archivedAt: Date.now() }).where(eq(s.sessions.id, f.session.sessionId)).run()
+      await blocked('runtime.session_inactive')
+    } finally { f.a.close(); f.c.close() }
+  })
+
+  it('never lets approval mode, automatic confirmation or an exact session grant authorize Agent resolution', async () => {
+    const f = await setup()
+    try {
+      const proposal = await f.a.call('canvas.organize.propose', { requestId: rid(), mode: 'category', reason: 'Separate the finished results.' })
+      const resolve = { requestId: rid(), proposalId: proposal.proposalId, action: 'dismiss' }
+      const refuse = () => expect(f.a.call('canvas.organize.resolve', resolve)).rejects.toMatchObject({
+        code: 'forbidden', rpc: { data: { reason: 'runtime.caller_forbidden', params: { method: 'canvas.organize.resolve', caller: 'agent' } } },
+      })
+      await refuse()
+      expect((await f.a.call('capabilities.list', {})).capabilities.map((entry: { method: string }) => entry.method)).not.toContain('canvas.organize.resolve')
+      await f.c.call('session.setApprovalMode', { requestId: rid(), sessionId: f.session.sessionId, mode: 'auto' })
+      const automatic = { sessionId: f.session.sessionId, turnId: f.turn.turnId, kind: 'command' as const,
+        summary: 'Invoke a tool', detail: 'vis canvas organize resolve', cwd: f.host.workDir(f.session.sessionId) }
+      await expect(f.turn.requestApproval(automatic)).resolves.toBe('allow_once')
+      await refuse()
+      await f.c.call('session.setApprovalMode', { requestId: rid(), sessionId: f.session.sessionId, mode: 'ask' })
+      const tool = { ...automatic, kind: 'other' as const, mcpTool: { serverName: 'vis' as const, toolName: 'canvas_organize_resolve' } }
+      const decision = f.turn.requestApproval(tool)
+      const approval = f.host.sessions.getTranscript({ sessionId: f.session.sessionId }).items.filter(item => item.kind === 'approval').at(-1)!
+      await f.c.call('session.respondApproval', { requestId: rid(), approvalId: approval.itemId, decision: 'allow_session' })
+      await expect(decision).resolves.toBe('allow_session')
+      await expect(f.turn.requestApproval(tool)).resolves.toBe('allow_session')
+      await refuse()
+      expect((await f.c.call('canvas.organize.proposals', {})).proposals).toEqual([proposal])
+      expect(await f.c.call('canvas.organize.resolve', resolve)).toMatchObject({ proposal: { status: 'dismissed' } })
+    } finally { f.a.close(); f.c.close() }
+  })
+})
 
 describe('agent media purpose permissions', () => {
   async function callers() {

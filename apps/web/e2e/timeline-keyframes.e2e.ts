@@ -385,8 +385,13 @@ describe.skipIf(!ready)('Minimal transform key editor', () => {
     const editor = await openReviewTimeline(doc, 'Independent axes')
     const timelineClip = editor.getByRole('group', { name: 'Overlay 1', exact: true }).getByRole('button', { name: /^Motion logo,/ })
     const glyph = (await timelineClip.getByRole('img', { name: 'Has transform keys', exact: true }).boundingBox())!
-    const label = (await timelineClip.getByText('Motion logo', { exact: true }).boundingBox())!
-    expect(glyph.y + glyph.height).toBeLessThanOrEqual(label.y)
+    // The label box includes gradient padding; only its foreground content must clear the motion glyph.
+    const labelTop = await timelineClip.getByText('Motion logo', { exact: true }).evaluate(element => {
+      const content = element.ownerDocument.createRange()
+      content.selectNodeContents(element)
+      return content.getBoundingClientRect().top
+    })
+    expect(glyph.y + glyph.height).toBeLessThanOrEqual(labelTop)
     await seek(editor, 1050)
     const overlay = editor.getByRole('button', { name: 'Overlay Motion logo', exact: true })
     await overlay.focus()

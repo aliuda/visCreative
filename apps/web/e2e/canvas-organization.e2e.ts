@@ -52,6 +52,57 @@ async function drag(id: string, dx: number, dy: number) {
   await page.mouse.up()
 }
 
+async function mixedLayoutCanvas() {
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 180; canvas.height = 300
+    const ctx = canvas.getContext('2d')!
+    ctx.fillStyle = '#384e66'; ctx.fillRect(0, 0, 180, 300)
+    ctx.fillStyle = '#efc982'; ctx.fillRect(55, 40, 70, 210)
+    return canvas.toDataURL('image/png').split(',')[1]!
+  })
+  await page.getByLabel('上传图片、视频或音频').setInputFiles(['portrait-a.png', 'portrait-b.png', 'upload.png'].map(name => ({
+    name, mimeType: 'image/png', buffer: Buffer.from(png, 'base64'),
+  })))
+  await expect.poll(async () => (await nodes()).filter(node => node.kind === 'image').length, { timeout: 10_000 }).toBe(3)
+  const videoPath = join(dir, 'organize-landscape.mp4')
+  execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=teal:s=320x180:d=0.2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', videoPath])
+  await page.getByLabel('上传图片、视频或音频').setInputFiles(videoPath)
+  await expect.poll(async () => (await nodes()).filter(node => node.kind === 'video').length, { timeout: 10_000 }).toBe(1)
+  const images = (await nodes()).filter(node => node.kind === 'image')
+  const video = (await nodes()).find(node => node.kind === 'video')!
+  const created = await apply([{ op: 'node.create', tempId: 'script', kind: 'script', title: 'Morning journey', category: 'Writing', x: 1400, y: 0 }])
+  const scriptId = created.idMap.script
+  const script = (await nodes()).find(node => node.nodeId === scriptId)!
+  const shots = await apply([{ op: 'script.patch', slotId: script.slots.find(slot => slot.slotKey === 'main')!.slotId, ops: [
+    { kind: 'shot.insert', tempId: 'opening', afterShotId: null, shot: { description: 'Opening portrait' } },
+    { kind: 'shot.insert', tempId: 'arrival', afterShotId: 'opening', shot: { description: 'Arrival video' } },
+  ] }])
+  await apply([
+    ...images.map((image, index): CanvasOp => ({ op: 'node.layout', nodeId: image.nodeId, x: index * 400, y: index === 1 ? 600 : 0 })),
+    { op: 'node.layout', nodeId: video.nodeId, x: 800, y: 650 },
+    { op: 'node.setMeta', nodeId: images[0]!.nodeId, title: 'Arrival portrait', category: 'Images', shot: { scriptNodeId: scriptId, shotId: shots.idMap.arrival, role: 'first' } },
+    { op: 'node.setMeta', nodeId: images[1]!.nodeId, title: 'Opening portrait', category: 'Images', shot: { scriptNodeId: scriptId, shotId: shots.idMap.opening, role: 'first' } },
+    { op: 'node.setMeta', nodeId: images[2]!.nodeId, title: 'Uncategorized upload' },
+    { op: 'node.setMeta', nodeId: video.nodeId, title: 'Arrival clip', category: 'Clips', shot: { scriptNodeId: scriptId, shotId: shots.idMap.arrival, role: 'video' } },
+  ])
+  await node(scriptId).waitFor()
+  await fitCanvas()
+  return { images, video, scriptId }
+}
+
+async function captureOrganizedCanvas(mode: string) {
+  await fitCanvas()
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector('.vis-canvas')!.getBoundingClientRect()
+    return [...document.querySelectorAll('.react-flow__node')].every(node => {
+      const bounds = node.getBoundingClientRect()
+      return bounds.left > canvas.left && bounds.right < canvas.right && bounds.top > canvas.top && bounds.bottom < canvas.bottom
+    })
+  })
+  await page.screenshot({ path: join(tmpdir(), `vis-0052a/${mode}-canvas.png`), animations: 'disabled' })
+}
+
 describe.skipIf(!ready)('Canvas organization and content purpose', () => {
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'vis-s16-e2e-'))
@@ -97,6 +148,69 @@ describe.skipIf(!ready)('Canvas organization and content purpose', () => {
     await studiod?.stop('user_quit')
     vi.unstubAllEnvs()
     removeTempDir(dir)
+  })
+
+  it('organizes a mixed canvas by category, previews column changes and undoes in one step', async () => {
+    await mixedLayoutCanvas()
+    const before = layout(await nodes())
+    await page.getByRole('button', { name: '整理', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: '整理画布', exact: true })
+    const preview = dialog.getByRole('img')
+    const automatic = await preview.getAttribute('viewBox')
+    await dialog.getByRole('combobox', { name: '列数', exact: true }).selectOption('1')
+    await expect.poll(() => preview.getAttribute('viewBox')).not.toBe(automatic)
+    mkdirSync(join(tmpdir(), 'vis-0052a'), { recursive: true })
+    await page.screenshot({ path: join(tmpdir(), 'vis-0052a/category.png'), animations: 'disabled' })
+    await dialog.getByRole('button', { name: '确认整理', exact: true }).click()
+    await expect.poll(async () => (await nodes()).filter(node => node.kind === 'frame').length).toBe(4)
+    await captureOrganizedCanvas('category')
+    await page.locator('.vis-canvas-wrap').focus()
+    await page.keyboard.press('ControlOrMeta+Z')
+    await expect.poll(async () => layout(await nodes())).toEqual(before)
+  })
+
+  it('organizes linked nodes by script shot order and lists untouched uploads', async () => {
+    const { images, video } = await mixedLayoutCanvas()
+    const before = layout(await nodes())
+    await page.getByRole('button', { name: '整理', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: '整理画布', exact: true })
+    await dialog.getByRole('radio', { name: '按脚本', exact: true }).check()
+    expect(await dialog.getByRole('combobox', { name: '列数', exact: true }).isDisabled()).toBe(true)
+    await dialog.getByText('Uncategorized upload', { exact: true }).waitFor()
+    mkdirSync(join(tmpdir(), 'vis-0052a'), { recursive: true })
+    await page.screenshot({ path: join(tmpdir(), 'vis-0052a/script.png'), animations: 'disabled' })
+    await dialog.getByRole('button', { name: '确认整理', exact: true }).click()
+    await expect.poll(async () => (await nodes()).filter(node => node.kind === 'frame').length).toBe(1)
+    const arranged = await nodes()
+    const at = (id: string) => arranged.find(node => node.nodeId === id)!
+    expect(at(images[1]!.nodeId).y).toBeLessThan(at(images[0]!.nodeId).y)
+    expect(at(images[0]!.nodeId).y).toBe(at(video.nodeId).y)
+    expect(at(images[0]!.nodeId).x).toBeLessThan(at(video.nodeId).x)
+    expect(at(images[2]!.nodeId)).toMatchObject(before.find(node => node.nodeId === images[2]!.nodeId)!)
+    await captureOrganizedCanvas('script')
+    await page.locator('.vis-canvas-wrap').focus()
+    await page.keyboard.press('ControlOrMeta+Z')
+    await expect.poll(async () => layout(await nodes())).toEqual(before)
+  })
+
+  it('organizes three selected nodes in place without creating frames and undoes once', async () => {
+    const { images } = await mixedLayoutCanvas()
+    const before = layout(await nodes())
+    for (const image of images) await node(image.nodeId).locator('.vis-node-label').click({ modifiers: ['ControlOrMeta'] })
+    await expect.poll(() => page.locator('.react-flow__node.selected').count()).toBe(3)
+    await page.getByRole('button', { name: '整理', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: '整理画布', exact: true })
+    await dialog.getByRole('radio', { name: '原地整理', exact: true }).check()
+    await dialog.getByRole('combobox', { name: '列数', exact: true }).selectOption('1')
+    mkdirSync(join(tmpdir(), 'vis-0052a'), { recursive: true })
+    await page.screenshot({ path: join(tmpdir(), 'vis-0052a/in-place.png'), animations: 'disabled' })
+    await dialog.getByRole('button', { name: '确认整理', exact: true }).click()
+    await expect.poll(async () => new Set((await nodes()).filter(node => images.some(image => image.nodeId === node.nodeId)).map(node => node.x)).size).toBe(1)
+    expect((await nodes()).filter(node => node.kind === 'frame')).toEqual([])
+    await captureOrganizedCanvas('in-place')
+    await page.locator('.vis-canvas-wrap').focus()
+    await page.keyboard.press('ControlOrMeta+Z')
+    await expect.poll(async () => layout(await nodes())).toEqual(before)
   })
 
   it('previews optional empty-frame removal and undoes it with member placement in one batch', async () => {
@@ -518,7 +632,7 @@ describe.skipIf(!ready)('Canvas organization and content purpose', () => {
     const before = layout(await nodes())
     await page.getByRole('button', { name: '整理', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: '整理画布', exact: true })
-    await dialog.getByRole('img', { name: '按类别排列的框与节点' }).waitFor()
+    await dialog.getByRole('img', { name: '整理后的框与节点' }).waitFor()
     expect(layout(await nodes())).toEqual(before)
     await dialog.getByRole('button', { name: '确认整理', exact: true }).click()
     await expect.poll(async () => (await nodes()).filter(item => item.kind === 'frame').length).toBe(1)

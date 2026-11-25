@@ -3,7 +3,8 @@ import { messages } from './messages'
 import { type Edge, MarkerType, Position } from '@xyflow/react'
 import type { CanvasOp, FrameColor, NodeKind, NodeView } from '@vis/protocol'
 
-export const NODE_GAP = 80
+import { NODE_GAP, frameMembers } from '@vis/canvas-layout'
+export { NODE_GAP, FRAME_MIN_SIZE, frameMembers } from '@vis/canvas-layout'
 export const nodeSize = (kind: NodeKind) => kind === 'previz' || kind === 'scene' ? { w: 360, h: 280 } : kind === 'timeline' ? { w: 360, h: 300 } : kind === 'script' ? { w: 480, h: 320 } : ({ w: kind === 'audio' ? 360 : 320, h: kind === 'audio' ? 140 : kind === 'text' ? 200 : kind === 'image' ? 320 : 180 })
 
 export function inputEdges(nodes: NodeView[], selected: ReadonlySet<string> = new Set(), locale: Locale = 'zh-CN', previous: Edge[] = []): Edge[] {
@@ -63,7 +64,6 @@ export function extensionPosition(node: NodeView, kind: NodeKind, nodes: NodeVie
   }, size, nodes, 'y')
 }
 
-export const FRAME_MIN_SIZE = { w: 320, h: 200 }
 export const FRAME_COLORS: Record<FrameColor, string> = {
   gray: 'var(--vis-frame-gray, var(--vis-text-dim))',
   blue: 'var(--vis-frame-blue, var(--vis-text-dim))',
@@ -73,20 +73,6 @@ export const FRAME_COLORS: Record<FrameColor, string> = {
   orange: 'var(--vis-frame-orange, var(--vis-warn))',
   red: 'var(--vis-frame-red, var(--vis-danger))',
   violet: 'var(--vis-frame-violet, var(--vis-text-dim))',
-}
-
-/** Server membership is the sole authority; cycles or duplicate memberships still move each node only once. */
-export function frameMembers(frameId: string, nodes: NodeView[]): NodeView[] {
-  const ids = new Set([frameId])
-  const members: NodeView[] = []
-  for (const id of ids) {
-    for (const node of nodes) {
-      if (node.frameId !== id || ids.has(node.nodeId)) continue
-      ids.add(node.nodeId)
-      members.push(node)
-    }
-  }
-  return members
 }
 
 export function frameMoveBatch(nodes: NodeView[], moves: { nodeId: string; x: number; y: number }[]) {

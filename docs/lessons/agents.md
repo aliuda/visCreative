@@ -127,6 +127,20 @@
 - **Instead:** pass server-only authorization into the canvas write callback, after replay lookup and fingerprint validation, so only new requests encounter the current rule and its reads still share the write transaction.
 - **Found in:** [RFC 0016 agent media visibility](../rfc/0016-canvas-organization.md#agent-media-visibility), `packages/canvas/core/src/service.ts` and `services/studiod/src/gateway.ts`.
 
+## Proposal age needs insertion order when timestamps tie
+
+- **Symptom:** adding the twenty-first proposal in one millisecond can expire the new proposal, and newest-first history can show a superseded proposal first.
+- **Cause:** the current ULID generator uses random suffixes within the same millisecond, so sorting by timestamp and ULID does not preserve insertion order.
+- **Instead:** break equal proposal timestamps with SQLite row insertion order for both expiry and listing. Keep an equal-timestamp cap test and verify the new proposal remains pending. Request replay still returns its original result independently of its later status.
+- **Found in:** [RFC 0052 step d1](../rfc/0052-canvas-layout.md#step-d1-implementation-2026-11-25), `packages/canvas/core/src/organize-proposals.ts`.
+
+## Finished fixture turns can still occupy execution slots
+
+- **Symptom:** the sixth or seventh fake-Agent scenario queues forever even though every earlier turn has finished.
+- **Cause:** root work items remain in progress and retain global execution slots across fixture projects; a null active turn does not deactivate the work item.
+- **Instead:** recall each isolated fixture's in-progress work items during teardown before creating more projects. Keep turn completion and work-item deactivation as separate assertions and actions.
+- **Found in:** [RFC 0052 step d2](../rfc/0052-canvas-layout.md#step-d2-implementation-2026-11-25), `apps/web/e2e/canvas-organize-proposals.e2e.ts`.
+
 ## Reviewable tool results must survive transcript truncation
 
 - **Symptom:** a scene proposal with many changes cannot be reconstructed from a session's tool-result text.

@@ -11,6 +11,7 @@ import type { VideoEncoder } from './video-encoder'
 import { streamHasAlpha, type AlphaStream } from './alpha'
 import { videoFrameRate } from './frame-rate'
 import { requireFfmpeg7 } from './ffmpeg-version'
+import { detectVideoEncoder } from './encoders'
 
 const exec = promisify(execFile)
 // Keep the browser/container rounding allowance aligned with local media operations (0021).
@@ -496,41 +497,67 @@ export async function renderTimeline(doc: TimelineDoc, sources: ReadonlyMap<stri
     }
     probed.set(clip.source.assetVersionId, { ...source, ...streams })
   }
-  const plan = planTimelineRender(parsed.data, probed, opts)
+  let encoder = opts.encoder
+  let plan = planTimelineRender(parsed.data, probed, opts)
+  const softwareEncoders = ['libx264', 'libopenh264']
+  const output = plan.output === 'video' ? { width: plan.width!, height: plan.height!, fps: plan.fps! } : undefined
+  if (plan.mode === 'encode' && encoder.hardware && output) {
+    // A generic capability probe cannot establish the minimum/maximum frame limits of this device.
+    const compatible = await detectVideoEncoder({ ffmpegPath: ffmpeg, priority: [encoder.name, ...softwareEncoders], output })
+    if (signal.aborted) throw abortError(signal)
+    if (compatible.name !== encoder.name) {
+      encoder = compatible
+      plan = planTimelineRender(parsed.data, probed, { ...opts, encoder })
+    }
+  }
   const dir = await mkdtemp(join(tmpdir(), 'vis-timeline-'))
   const dispose = () => rm(dir, { recursive: true, force: true })
   try {
-    for (const file of plan.files) await writeFile(join(dir, file.name), file.content, 'utf8')
-    for (const copy of plan.copies) {
-      await mkdir(dirname(join(dir, copy.name)), { recursive: true })
-      await copyFile(copy.path, join(dir, copy.name))
-    }
-    const captions = plan.files.some(file => file.name === 'captions.ass')
-    // Run caption filters in their own directory: relative ASS paths avoid two layers of filter
-    // escaping, including Windows drive colons and Unicode paths. Media inputs stay absolute.
-    const args = plan.args.map((arg, index) => {
-      if (plan.args[index - 1] === '-/filter_complex' || (plan.mode === 'copy' && plan.args[index - 1] === '-i')) return join(dir, arg)
-      if (captions && plan.args[index - 1] === '-i') return resolve(plan.cwd ?? process.cwd(), arg)
-      return arg
-    })
     const path = join(dir, `output.${plan.ext}`)
-    checkCommandBudget([...args, path], ffmpeg)
     let progress = 0
+    let attempts = 0
+    const run = async () => {
+      for (const file of plan.files) await writeFile(join(dir, file.name), file.content, 'utf8')
+      for (const copy of plan.copies) {
+        await mkdir(dirname(join(dir, copy.name)), { recursive: true })
+        await copyFile(copy.path, join(dir, copy.name))
+      }
+      const captions = plan.files.some(file => file.name === 'captions.ass')
+      // Relative ASS paths avoid filter escaping; media inputs remain absolute in the caption directory.
+      const args = plan.args.map((arg, index) => {
+        if (plan.args[index - 1] === '-/filter_complex' || (plan.mode === 'copy' && plan.args[index - 1] === '-i')) return join(dir, arg)
+        if (captions && plan.args[index - 1] === '-i') return resolve(plan.cwd ?? process.cwd(), arg)
+        return arg
+      })
+      checkCommandBudget([...args, path], ffmpeg)
+      attempts++
+      await runMedia(ffmpeg, ['-v', 'error', '-nostdin', '-progress', 'pipe:1', '-nostats', ...args, '-y', path], {
+        signal,
+        ...(captions ? { cwd: dir } : plan.cwd ? { cwd: plan.cwd } : {}),
+        onTime(ms) {
+          progress = Math.max(progress, Math.min(1, ms / plan.durationMs))
+          opts.onProgress?.(progress)
+        },
+      })
+    }
     opts.onProgress?.(0)
-    await runMedia(ffmpeg, ['-v', 'error', '-nostdin', '-progress', 'pipe:1', '-nostats', ...args, '-y', path], {
-      signal,
-      ...(captions ? { cwd: dir } : plan.cwd ? { cwd: plan.cwd } : {}),
-      onTime(ms) {
-        progress = Math.max(progress, Math.min(1, ms / plan.durationMs))
-        opts.onProgress?.(progress)
-      },
-    })
+    try { await run() }
+    catch (error) {
+      if (signal.aborted || !encoder.hardware || plan.mode !== 'encode' || !output) throw error
+      // runMedia waits for close: the failed output is unlocked before -y replaces it on Windows.
+      console.warn(`[timeline.export] encoder=${encoder.name} failed; retrying with software at ${output.width}x${output.height}`)
+      encoder = await detectVideoEncoder({ ffmpegPath: ffmpeg, priority: softwareEncoders, output })
+      if (signal.aborted) throw abortError(signal)
+      plan = planTimelineRender(parsed.data, probed, { ...opts, encoder })
+      await run()
+    }
     if (signal.aborted) throw abortError(signal)
     // Copy mode preserves real source lengths, which can differ from the document within its rounding allowance.
-    const output = await probeTimelineSource(path, { ...(opts.ffprobePath ? { ffprobePath: opts.ffprobePath } : {}), signal })
-    const fps = plan.output === 'video' ? videoFrameRate(output.video?.frameRate) : undefined
+    const rendered = await probeTimelineSource(path, { ...(opts.ffprobePath ? { ffprobePath: opts.ffprobePath } : {}), signal })
+    const fps = plan.output === 'video' ? videoFrameRate(rendered.video?.frameRate) : undefined
+    console.info(`[timeline.export] mode=${plan.mode} encoder=${plan.mode === 'copy' ? 'copy' : plan.output === 'audio' ? 'aac' : encoder.name} attempts=${attempts}`)
     opts.onProgress?.(1)
-    return { path, kind: plan.output, mime: plan.output === 'video' ? 'video/mp4' : 'audio/mp4', ...(plan.width ? { width: plan.width, height: plan.height! } : {}), ...(fps !== undefined ? { fps } : {}), durationMs: Math.round(output.probedDurationMs ?? plan.durationMs), mode: plan.mode, dispose }
+    return { path, kind: plan.output, mime: plan.output === 'video' ? 'video/mp4' : 'audio/mp4', ...(plan.width ? { width: plan.width, height: plan.height! } : {}), ...(fps !== undefined ? { fps } : {}), durationMs: Math.round(rendered.probedDurationMs ?? plan.durationMs), mode: plan.mode, dispose }
   } catch (error) {
     await dispose()
     throw error

@@ -558,9 +558,10 @@ describe.skipIf(!ready)('Work board and project canvas', () => {
     await expect.poll(() => item(work.workItemId)).toMatchObject({ status: 'in_progress' })
     const activated = await item(work.workItemId)
     // Commit attribution and events in the same real MCP operation so database fixtures do not bypass the changes cache.
+    // Agents cannot move existing nodes since RFC 0052; z-only updates still exercise layout history.
     await admin.call('session.sendMessage', { requestId: rid(), sessionId: activated.sessions[0]!.sessionId, refs: [], text: `工作代理检查：${JSON.stringify({ scenario: 'canvas', ops: [
       { op: 'slot.setText', slotId: updatedSlot.slotId, expectedRevision: updatedSlot.revision, body: afterText },
-      { op: 'node.layout', nodeId: updated.nodeId, x: 2200, y: 500 },
+      { op: 'node.layout', nodeId: updated.nodeId, z: updated.z + 1 },
       { op: 'node.delete', nodeId: deleted.nodeId },
       { op: 'node.create', tempId: 'added', kind: 'text', x: 2800, y: 500, w: 400, h: 150, content: { text: '霓虹补充镜头\n雨滴落进暖橙色的倒影。' } },
     ] })}` })

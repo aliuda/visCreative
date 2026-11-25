@@ -294,6 +294,16 @@ This review narrows the earlier follow-up lock-storage rule to the author action
 
 Notice context again uses explicit numeric content and selection counters. A stable refusal callback reads the latest counters through a ref, including callbacks retained before a pointerdown changes selection. Notices retain only numbers, never a document or memoized identity token. Visibility derives from those counters and clip presence; an effect discards restored missing-clip notices after commit, with no state update during render. Component regressions cover key add/remove, ease, reset, unknown-size field/nudge edits, metadata resolution during a pointer gesture, and an immediate pointerup refusal through a callback captured before selecting an unselected capped overlay. Existing save-race, restoration, selection and single-render transition checks remain in place.
 
+### Windows export and label acceptance (2026-11-25)
+
+The rotated-phone acceptance failed because hardware availability at the generic 256×256 capability probe did not establish support for the resolved 108×192 export. On the Windows reference machine NVENC rejected that frame below its minimum in about 265 ms, before producing any frames; the 30-second wait for Exported obscured a terminal encoder error rather than measuring a slow export.
+
+After probing sources and resolving rotation, the renderer trials the selected hardware encoder with the actual output width, height and frame rate. The installed device/driver enforces its own minimum/maximum frame limits; no fixed assumed GPU range or resizing of authored output is introduced. These trials are cached separately by executable, priority, dimensions and frame rate. An incompatible output selects the existing software profiles, x264 then OpenH264, with their existing quality options. A hardware failure during the real render retries once in software, rebuilding encoder-specific inputs and filters while retaining the same submitted document, dimensions, frame rate, audio, cancellation and output format. Cancellation and software failure do not retry. Progress remains monotonic, and the export log records the final encoder and attempt count. Stream copy remains unchanged.
+
+Unit regressions cover frames below both minimum axes and above both maximum axes, separate output-cache entries, a runtime hardware failure, failed software retry, cancellation, cleanup, encoder-specific filters and unchanged output settings. The phone browser case retains its original 30-second success wait and 108×192 output assertion.
+
+The independent motion-glyph assertion also failed before editing. Its 736-pixel bottom was compared with the label's 735.96875-pixel gradient/padding box, while foreground text and icon began at 744.96875. DPR 1 and 2 produced identical geometry; changing the font changed the box. The assertion now compares the glyph against a DOM Range around that foreground content, retaining the exact no-overlap inequality and all saved x/y key assertions. Product clamp/keyframe math and CSS need no change.
+
 ## Agents
 
 - The timeline guide (`workbench/core/src/instructions/guides/timeline.ts`) and Claude's `prompt.ts` document `crop`, animatable overlay fields, source-time keys and the aspect rule, with one example each (a vertical reframe that pans; a slow push-in on a still). No recommended moves or defaults.

@@ -55,6 +55,8 @@ describe('vis mcp', () => {
     expect(names).not.toContain('session_rename')
     expect(names).not.toContain('session_reset_title')
     expect(names).toContain('asset_import_file')
+    expect(names).toEqual(expect.arrayContaining(['canvas_organize_propose', 'canvas_organize_proposals']))
+    expect(names).not.toContain('canvas_organize_resolve')
     expect(names).toEqual(expect.arrayContaining(['asset_list', 'asset_label', 'library_state']))
     expect(names).not.toContain('asset_update')
     expect(names).not.toContain('library_runRevert')

@@ -13,7 +13,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { type AssetStore, createAssetStore, type MediaTools } from '@vis/assets'
 import { createMediaTaskService, type MediaTaskService } from './media-tasks'
 import { createMediaPreviewService, type MediaPreviewService } from './media-previews'
-import { type CanvasService, createCanvasService, markScriptEntitiesChanged, migrateScriptEntities } from '@vis/canvas-core'
+import { type CanvasService, createCanvasService, createOrganizeProposalService, markScriptEntitiesChanged, migrateScriptEntities } from '@vis/canvas-core'
 import { createEntityService, createSeriesEntityService, detachSeriesEntities, createSeriesLibrary, type EntityService, type SeriesEntityService, type SeriesLibrary } from '@vis/library-core'
 import { createSeriesRegistry, type SeriesRegistry } from './series-registry'
 import { newId, VisError } from '@vis/domain'
@@ -114,6 +114,7 @@ export type SpaceHost = {
   mediaPreviews: MediaPreviewService
   textDeletion: ReturnType<typeof createTextDeletionService>
   sceneProposals: ReturnType<typeof createSceneProposalService>
+  organizeProposals: ReturnType<typeof createOrganizeProposalService>
   textProposals: ReturnType<typeof createTextProposalService>
   canvas: CanvasService
   entities: EntityService
@@ -155,6 +156,7 @@ export function openSpaceHost(spaceId: string, dir: string, opts: SpaceHostOptio
   const assets = createAssetStore({ blobsDir: join(dir, 'blobs'), now })
   const library = createLibraryService({ db, blobPath: hash => assets.blobPath(hash), now })
   const canvas = createCanvasService({ db, now, onChanged: tx => { refreshReviews(tx, now()) } })
+  const organizeProposals = createOrganizeProposalService({ db, now, onChanged: tx => { refreshReviews(tx, now()) } })
   const sceneProposals = createSceneProposalService(db, now)
   const textProposals = createTextProposalService(db, now)
   const textDeletion = createTextDeletionService(db, now)
@@ -217,7 +219,7 @@ export function openSpaceHost(spaceId: string, dir: string, opts: SpaceHostOptio
   if (!pendingRecovery && !opts.suspended) { generation.start(); scriptBatches.startScheduler() }
 
   return {
-    spaceId, rootPath, workDir, db, assets, canvas, sceneProposals, textProposals, textDeletion, entities, seriesEntities, generation, mediaTasks, mediaPreviews, scriptBatches, sessions, work, workDeletion, skills, library,
+    spaceId, rootPath, workDir, db, assets, canvas, organizeProposals, sceneProposals, textProposals, textDeletion, entities, seriesEntities, generation, mediaTasks, mediaPreviews, scriptBatches, sessions, work, workDeletion, skills, library,
     async close() {
       textDeletion.close()
       workDeletion.close()

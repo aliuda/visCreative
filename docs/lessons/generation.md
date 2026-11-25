@@ -1,5 +1,12 @@
 # Generation lessons
 
+## A working encoder can reject the export's frame size
+
+- **Symptom:** a two-second phone export never shows Exported, even though other timeline exports finish promptly.
+- **Cause:** NVENC passes the generic 256×256 trial but rejects the resolved 108×192 output below its device minimum in about 265 ms. Waiting for success hides this terminal failure as a 30-second browser timeout.
+- **Instead:** after probing rotation and planning the output, trial the selected device at the actual dimensions and frame rate, with the driver enforcing its minimum/maximum limits. Cache by output shape as well as executable and priority. Fall back to software for incompatible frames, and retry a later hardware failure once in software with the same document, output and cancellation signal. Rebuild the encoder-specific graph/options, await process closure before replacing partial output, preserve monotonic progress, and log the encoder used. Never retry cancellation or a software failure.
+- **Found in:** [RFC 0050 Windows export correction](../rfc/0050-clip-transforms.md#windows-export-and-label-acceptance-2026-11-25), `encoders.test.ts` and `timeline-render-execution.test.ts`.
+
 ## Independent crop origin and size rounding can cross the frame edge
 
 - **Symptom:** a half-frame crop at 0.5 on a 1001-pixel source compiles to origin 501 and width 501.

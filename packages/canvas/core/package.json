@@ -15,6 +15,7 @@
     "@vis/domain": "workspace:*",
     "@vis/storage": "workspace:*",
     "@vis/assets": "workspace:*",
-    "@vis/library-core": "workspace:*"
+    "@vis/library-core": "workspace:*",
+    "@vis/canvas-layout": "workspace:*"
   }
 }

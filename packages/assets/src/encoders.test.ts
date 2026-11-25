@@ -57,6 +57,39 @@ describe('Video encoder selection', () => {
     expect(trials(exec)).toEqual(['h264_nvenc', 'h264_qsv'])
   })
 
+  it.each([
+    [108, 192, 'libx264'],
+    [192, 108, 'libx264'],
+    [8192, 2160, 'libx264'],
+    [1920, 4320, 'libx264'],
+    [1920, 1080, 'h264_nvenc'],
+  ])('checks the driver limits at %sx%s before choosing %s', async (width, height, expected) => {
+    const exec = runner(['h264_nvenc', 'libx264'])
+    exec.mockImplementation(async (_path, args) => {
+      if (args.includes('-encoders')) return { stdout: ' V..... h264_nvenc H.264\n V..... libx264 H.264' }
+      const size = /size=(\d+)x(\d+)/.exec(args[args.indexOf('-i') + 1]!)!
+      if (args.includes('h264_nvenc') && (+size[1]! < 144 || +size[2]! < 144 || +size[1]! > 4096 || +size[2]! > 4096)) {
+        throw new Error('Requested frame dimensions are outside this device range')
+      }
+      return { stdout: '' }
+    })
+    const opts = { ...options(exec), priority: ['h264_nvenc', 'libx264', 'libopenh264'], output: { width, height, fps: 10 } }
+    expect(await detectVideoEncoder(opts)).toMatchObject({ name: expected })
+    expect(exec.mock.calls[1]![1]).toContain(`color=black:size=${width}x${height}:rate=10`)
+    expect(trials(exec)).toEqual(expected === 'h264_nvenc' ? ['h264_nvenc'] : ['h264_nvenc', 'libx264'])
+  })
+
+  it('shares output trials without reusing support for a different size or frame rate', async () => {
+    const exec = runner(['h264_nvenc'])
+    const opts = { ...options(exec), output: { width: 1920, height: 1080, fps: 30 } }
+    const first = detectVideoEncoder(opts)
+    expect(detectVideoEncoder({ ...opts, output: { ...opts.output } })).toBe(first)
+    await first
+    await detectVideoEncoder({ ...opts, output: { width: 108, height: 192, fps: 30 } })
+    await detectVideoEncoder({ ...opts, output: { ...opts.output, fps: 60 } })
+    expect(trials(exec)).toEqual(['h264_nvenc', 'h264_nvenc', 'h264_nvenc'])
+  })
+
   it('uses VAAPI device initialization and upload filters in the trial and the profile', async () => {
     const exec = runner(['h264_vaapi'])
     const result = await detectVideoEncoder(options(exec, 'linux'))

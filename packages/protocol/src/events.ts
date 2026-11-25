@@ -41,6 +41,8 @@ export const EVENT_TYPES = [
   'text.proposalChanged',
   // 0044: scene review states changed; payload { proposalId, slotId }
   'scene.proposalChanged',
+  // 0052 step d: an organize suggestion was created or changed state; payload { proposalId, status }
+  'canvas.organizeProposalChanged',
 ] as const
 export const EventType = z.enum(EVENT_TYPES)
 export type EventType = z.infer<typeof EventType>

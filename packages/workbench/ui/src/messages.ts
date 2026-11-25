@@ -640,6 +640,8 @@ export const sessionMessages = defineMessages({
   tool_gen_get: '查询生成任务状态与产物',
   tool_providers_list: '列出生成服务与模型',
   tool_canvas_apply: '批量修改画布',
+  tool_canvas_organize_propose: '提交画布整理建议',
+  tool_canvas_organize_proposals: '读取画布整理建议',
   tool_text_request_delete: '请求删除正文授权',
   tool_text_propose: '提交正文修改建议',
   tool_scene_propose: '提交场景修改建议',
@@ -872,6 +874,8 @@ export const sessionMessages = defineMessages({
   tool_gen_get: 'Get generation status and outputs',
   tool_providers_list: 'List generation providers and models',
   tool_canvas_apply: 'Apply canvas changes',
+  tool_canvas_organize_propose: 'Propose canvas organization',
+  tool_canvas_organize_proposals: 'Read canvas organize proposals',
   tool_text_request_delete: 'Request manuscript deletion approval',
   tool_text_propose: 'Propose manuscript edits',
   tool_scene_propose: 'Propose scene changes',
@@ -1143,4 +1147,20 @@ export const sceneProposalMessages = defineMessages({
 }, {
   title: 'Scene proposal', duration: 'Scene duration', acceptAll: 'Accept all', rejectAll: 'Reject all', open: 'Open in scene editor',
   state: (state: string) => ({ pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', stale: 'Stale', superseded: 'Superseded' } as Record<string, string>)[state] ?? state,
+})
+
+export const organizeProposalMessages = defineMessages({
+  title: '画布整理建议', preview: '预览', unavailable: '建议状态不可用',
+  summary: (mode: string, count: string) => `${mode} · ${count} 个节点`,
+  mode: (mode: 'category' | 'script' | 'inPlace') => ({ category: '按类别', script: '按脚本', inPlace: '原地整理' })[mode],
+  status: (status: 'pending' | 'applied' | 'dismissed' | 'stale' | 'superseded' | 'expired') => ({
+    pending: '待审', applied: '已应用', dismissed: '已忽略', stale: '无需整理', superseded: '已被替代', expired: '已过期',
+  })[status],
+}, {
+  title: 'Organize suggestion', preview: 'Preview', unavailable: 'Suggestion status unavailable',
+  summary: (mode: string, count: string) => `${mode} · ${count} nodes`,
+  mode: (mode: 'category' | 'script' | 'inPlace') => ({ category: 'By category', script: 'By script', inPlace: 'In place' })[mode],
+  status: (status: 'pending' | 'applied' | 'dismissed' | 'stale' | 'superseded' | 'expired') => ({
+    pending: 'Pending', applied: 'Applied', dismissed: 'Dismissed', stale: 'Stale', superseded: 'Superseded', expired: 'Expired',
+  })[status],
 })

@@ -20,6 +20,8 @@ When deriving a result from other nodes, set inputs to their node IDs on creatio
 
 Omit coordinates to let the server place nodes and read the returned placements for their actual positions. Writing an image or video to an existing node automatically adjusts its height to the media aspect ratio, so a separate node.layout change is unnecessary.
 
+Never move or resize existing nodes: the gateway refuses node.layout with x, y, w or h, and frame.move, for nodes that predate the batch. Creation coordinates and later layout by a tempId created earlier in the same batch are allowed; z alone is allowed. Use canvas.organize.propose instead, at most once per finished batch of results and only when the result area is visibly disordered. State the reason in one sentence. The author previews and applies the proposal; approvals cannot let an Agent resolve it.
+
 Text the user last edited cannot be overwritten or deleted directly: read the writing guide. To delete it at the user's request, call text.requestDelete so they get an approval card.
 
 Read before editing content and carry expectedRevision on text or asset writes. On revision_conflict, reread and merge with concurrent edits. Local files become canvas assets through asset_import_file, followed by canvas_apply; see the media guide for import paths.

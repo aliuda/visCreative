@@ -15,6 +15,14 @@ it('shared instructions use the canvas MCP tools available to Codex', () => {
   expect(instructions.slice(0, CORE_INSTRUCTIONS.length)).toBe(CORE_INSTRUCTIONS)
 })
 
+it('protects existing layouts and limits organize proposals in every prompt environment', () => {
+  for (const isolation of ['sandbox', 'none'] as const) {
+    for (const text of ['Leave positions to the server', 'Never move or resize existing nodes', 'gateway refuses it', 'canvas.organize.propose', 'at most once per finished batch', 'visibly disordered', 'reason in one sentence']) {
+      expect(developerInstructions(undefined, isolation)).toContain(text)
+    }
+  }
+})
+
 it.each(['sandbox', 'none'] as const)('keeps the shared core byte-identical with %s isolation', isolation => {
   const instructions = developerInstructions(undefined, isolation)
   expect(instructions).toBe(sharedAgentInstructions({ environment: { access: 'expanded', isolation } }))

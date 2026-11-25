@@ -77,7 +77,7 @@ describe('capabilities', () => {
       'asset.list', 'asset.label', 'library.state',
       'text.requestDelete', 'scene.propose', 'scene.proposal.list', 'text.propose', 'text.proposal.list', 'series.textList', 'series.textRead',
       'session.setTitle',
-      'generation.submit', 'generation.cancel', 'generation.recheck', 'generation.get', 'providers.list', 'canvas.apply', 'canvas.get', 'asset.get', 'asset.importFile', 'asset.extractFrames', 'media.process', 'media.get', 'script.batch.plan', 'script.batch.start', 'script.batch.get', 'script.batch.list', 'script.batch.cancel', 'media.analyze', 'font.list',
+      'generation.submit', 'generation.cancel', 'generation.recheck', 'generation.get', 'providers.list', 'canvas.apply', 'canvas.organize.propose', 'canvas.organize.proposals', 'canvas.get', 'asset.get', 'asset.importFile', 'asset.extractFrames', 'media.process', 'media.get', 'script.batch.plan', 'script.batch.start', 'script.batch.get', 'script.batch.list', 'script.batch.cancel', 'media.analyze', 'font.list',
       // The gateway additionally checks work item API permissions by workspace relationships.
       'work.list', 'work.get', 'work.dispatch', 'work.agentOptions', 'work.setAgentConfig', 'work.activate', 'work.recall', 'work.requestDelete', 'work.report', 'work.reply', 'work.review',
       'skill.proposeDraft', 'capabilities.list', 'capabilities.describe', 'guide.get', 'slot.history',

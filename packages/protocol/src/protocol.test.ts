@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { SKILL_SOURCE_LIMITS } from './runtime'
 import { METHODS, isMethodName } from './methods'
 import { WorkMessageKind, WorkMessageFrom, WorkFailure, WorkSessionView } from './work'
-import { NodeView } from './canvas'
+import { NodeView, ORGANIZE_LIMITS, ORGANIZE_PROPOSAL_LIMITS, OrganizeProposalStatus } from './canvas'
 import { ApprovalPayload, MessageRef, SessionSummary, TranscriptItem, UserMessagePayload, ViewedImages, VIEWED_IMAGES_LIMITS } from './session'
-import { NOTIFICATIONS } from './events'
+import { EventType, NOTIFICATIONS } from './events'
 import { ErrorData } from './rpc'
 import { MediaTaskView, numberReferences } from './operations'
 import { JobView } from './generation'
@@ -368,6 +368,44 @@ describe('protocol', () => {
     expect(ApprovalPayload.safeParse({ ...payload, mcpTool: { serverName: 'other', toolName: 'canvas_get' } }).success).toBe(false)
     expect(ApprovalPayload.safeParse({ ...payload, mcpTool: { serverName: 'vis', toolName: '' } }).success).toBe(false)
     expect(TranscriptItem.safeParse({ itemId: 'approval_1', createdSeq: 1, revision: 1, turnId: 't', kind: 'approval', payload, createdAt: 1, updatedAt: 1 }).success).toBe(true)
+  })
+
+  it('canvas.organize is UI-only, bounded and carries the previewed plan digest (RFC 0052)', () => {
+    const organize = METHODS['canvas.organize']
+    expect(organize.callers).toEqual(['ui'])
+    const base = { requestId: 'organize', mode: 'category', removeEmptyFrames: true, titles: { uncategorized: 'Uncategorized', untitledScript: 'Script' }, planDigest: 'digest' }
+    expect(organize.params.parse(base).columns).toBe('auto')
+    expect(organize.params.safeParse({ ...base, mode: 'script', columns: ORGANIZE_LIMITS.columns }).success).toBe(true)
+    expect(organize.params.safeParse({ ...base, mode: 'inPlace', nodeIds: ['a', 'b'] }).success).toBe(true)
+    expect(organize.params.safeParse({ ...base, mode: 'masonry' }).success).toBe(false)
+    expect(organize.params.safeParse({ ...base, columns: 0 }).success).toBe(false)
+    expect(organize.params.safeParse({ ...base, columns: ORGANIZE_LIMITS.columns + 1 }).success).toBe(false)
+    expect(organize.params.safeParse({ ...base, nodeIds: [] }).success).toBe(false)
+    expect(organize.params.safeParse({ ...base, nodeIds: Array.from({ length: ORGANIZE_LIMITS.nodes + 1 }, (_, i) => `n${i}`) }).success).toBe(false)
+    expect(organize.params.safeParse({ ...base, planDigest: '' }).success).toBe(false)
+    expect(organize.params.safeParse({ ...base, titles: { uncategorized: '  ', untitledScript: 'Script' } }).success).toBe(false)
+    expect(organize.result.safeParse({ operationId: 'op', idMap: {}, changed: 0, eventSeq: 1 }).success).toBe(false)
+  })
+
+  it('organize proposals: Agents suggest parameters, only the UI applies with its own preview digest (RFC 0052 step d)', () => {
+    const propose = METHODS['canvas.organize.propose']
+    const resolve = METHODS['canvas.organize.resolve']
+    expect(propose.callers).toEqual(['agent'])
+    expect(METHODS['canvas.organize.proposals'].callers).toEqual(['ui', 'agent'])
+    expect(resolve.callers).toEqual(['ui'])
+    const suggestion = { requestId: 'p', mode: 'script', reason: 'Shots are out of order' }
+    expect(propose.params.parse(suggestion).columns).toBe('auto')
+    expect(propose.params.safeParse({ ...suggestion, reason: ' ' }).success).toBe(false)
+    expect(propose.params.safeParse({ ...suggestion, reason: 'x'.repeat(ORGANIZE_PROPOSAL_LIMITS.reason + 1) }).success).toBe(false)
+    // Agents cannot choose author-side choices: titles, empty-frame removal or a digest.
+    expect('planDigest' in propose.params.parse({ ...suggestion, planDigest: 'd' })).toBe(false)
+    const apply = { requestId: 'r', proposalId: 'p1', action: 'apply', removeEmptyFrames: true, titles: { uncategorized: 'Uncategorized', untitledScript: 'Script' }, planDigest: 'd' }
+    expect(resolve.params.safeParse(apply).success).toBe(true)
+    expect(resolve.params.safeParse({ ...apply, planDigest: undefined }).success).toBe(false)
+    expect(resolve.params.safeParse({ requestId: 'r', proposalId: 'p1', action: 'dismiss' }).success).toBe(true)
+    expect(resolve.params.safeParse({ requestId: 'r', proposalId: 'p1', action: 'accept' }).success).toBe(false)
+    expect(OrganizeProposalStatus.options).toEqual(['pending', 'applied', 'dismissed', 'stale', 'superseded', 'expired'])
+    expect(EventType.safeParse('canvas.organizeProposalChanged').success).toBe(true)
   })
 
   it('all five core interfaces are registered with callers matching 0003', () => {

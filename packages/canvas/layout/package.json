@@ -1,0 +1,13 @@
+{
+  "name": "@vis/canvas-layout",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pure shared canvas organization planner.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run src"
+  },
+  "dependencies": { "@vis/protocol": "workspace:*" }
+}

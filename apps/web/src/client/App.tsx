@@ -1,4 +1,5 @@
 import { useSceneProposals, useSceneProposalsForNode, resolveSceneProposal } from './scene-proposals'
+import { useOrganizeProposals } from './organize-proposals'
 import { useWritingProposals } from './writing-proposals'
 import { describeError, useLocale, useMessages, useFormat, type Locale } from '@vis/ui-kit'
 import { mySkillsMessages, messages } from './messages'
@@ -268,6 +269,15 @@ export function App({ conn, localePreference, onLocaleChange }: { conn: SpaceCon
   }, [])
   useEffect(() => { setTimelineId(null); setPrevizId(null); setSceneRequest(null); setWritingId(null); setWritingImportAt(null) }, [spaceId])
   const scenes = useSceneProposals(conn, view.space?.spaceId, view.ready)
+  const organizeSuggestions = useOrganizeProposals(conn, spaceId, view.ready && view.status === 'open')
+  const [organizePreviewRequest, setOrganizePreviewRequest] = useState<{ proposalId: string; seq: number }>()
+  const organizeSessionTitles = useMemo(() => new Map([...view.state.sessions.values()].map(session => [session.sessionId, session.title])), [view.state.sessions])
+  useEffect(() => {
+    for (const id of new Set(organizeSuggestions.pending.map(proposal => proposal.sessionId))) {
+      if (!view.state.sessions.has(id)) void conn.loadSession(id).catch(() => {})
+    }
+  }, [conn, organizeSuggestions.pending, view.state.sessions])
+  useEffect(() => setOrganizePreviewRequest(undefined), [spaceId])
   const sceneProposalHost = useMemo(() => ({
     state: (proposalId: string) => scenes.byId.get(proposalId),
     resolve: async (slotId: string, action: 'accept' | 'reject', changes: SceneChangeRef[]) => {
@@ -364,6 +374,13 @@ export function App({ conn, localePreference, onLocaleChange }: { conn: SpaceCon
     locateChanges,
     openSettings: () => { setSettingsSection('guardrails'); setSettingsOpen(true) },
   })
+  const organizeProposalHost = useMemo(() => ({
+    state: (proposalId: string) => organizeSuggestions.byId.get(proposalId),
+    open: (proposalId: string) => {
+      work.showCanvas()
+      setOrganizePreviewRequest(previous => ({ proposalId, seq: (previous?.seq ?? 0) + 1 }))
+    },
+  }), [organizeSuggestions.byId, work.showCanvas])
   const locateRequest = useRef(0)
   async function locateChanges(workItemId: string) {
     const item = conn.getView().work.items.get(workItemId)
@@ -587,6 +604,7 @@ export function App({ conn, localePreference, onLocaleChange }: { conn: SpaceCon
               <div className="app-canvas" style={{ display: work.mainView === 'canvas' ? 'flex' : 'none', flex: 1, minWidth: 0 }}>
               <GenerationSettingsContext.Provider value={generationSettings}>
               <CanvasView key={spaceId} hidden={work.mainView !== 'canvas'} suspended={!!timelineHost || !!previzNode || !!sceneNode || !!writingNode || !!writingImportAt} nodes={nodes} historySource={historySource} decorations={writingDecorations} onDismissJobs={conn.dismissJobs} onDismissMediaTask={conn.dismissMediaTask} assetUrl={assetUrl} posterUrl={posterUrl} thumbnailUrl={thumbnailUrl} focusRequest={focusRequest} {...actions} onDropData={dropLibraryMedia} dropDataTypes={libraryDropTypes} scriptSessions={scriptSessions} {...(openSessionId ? { currentScriptSessionId: openSessionId } : {})} generationOperations={operations}
+                organizeProposals={organizeSuggestions.pending} organizeSessionTitles={organizeSessionTitles} organizePreviewRequest={organizePreviewRequest}
                 renderScriptSettingPicker={props => <SettingPicker host={scriptSettingsHost} {...props} />} />
               </GenerationSettingsContext.Provider>
               </div>
@@ -598,7 +616,7 @@ export function App({ conn, localePreference, onLocaleChange }: { conn: SpaceCon
         {assetLibraryHost && libraryPreference.projectId === spaceId && libraryPreference.open ? <LibraryPanel key={spaceId} host={assetLibraryHost} tab={libraryPreference.tab} onTabChange={tab => changeLibrary({ tab })}
           settingsHeader={<SettingsHeader host={assetLibraryHost} runControls={<LibraryRunControls host={assetLibraryHost} kind="merge" />} />}
           renderGroupIntoSetting={(assetIds, close) => <GroupIntoSettingDialog host={assetLibraryHost} assetIds={assetIds} onClose={close} onGrouped={close} />} /> : null}
-        <SessionPanel sceneProposalHost={sceneProposalHost} skillDraftHost={skillDraftHost}
+        <SessionPanel sceneProposalHost={sceneProposalHost} organizeProposalHost={organizeProposalHost} skillDraftHost={skillDraftHost}
           showProjectSwitcher={false}
           workTree={work.tree}
           projectAttention={new Set(view.work.inboxCounts?.bySpace.filter(project => project.unresolved > 0).map(project => project.spaceId))}

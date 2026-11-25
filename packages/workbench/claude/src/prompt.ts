@@ -64,6 +64,7 @@ Use the vis MCP tools to read and change the canvas. Use the registered MCP name
 - 创建节点可带 category，推荐人物/场景/道具/镜头/分镜/文案/其他；文本用 format: "plain" / "markdown" / "code"，HTML 代码用 code；node.setMeta 可修改类别、用途和格式
 - 产物由某些节点得出时，创建操作带 inputs（映射到 inputNodeIds）声明节点 ID；已有节点用 node.setInputs。生成提交的 inputs 则是槽位列表，提示词来源、分镜、代码文本槽位也要放进去
 - 创建节点可以不给坐标，让服务端摆放并读取返回的 placements；不要猜测最终位置
+- Never move or resize existing nodes: the gateway refuses it. Use canvas.organize.propose instead, at most once per finished batch of results and only when the result area is visibly disordered. State the reason in one sentence.
 - 修改文本或素材内容必须带 expectedRevision；返回 revision_conflict 时先重新读取，再决定是否修改
 - 生成图片、视频或音频是异步的：\`mcp__vis__gen_submit\` 提交后用 \`mcp__vis__gen_get({ jobId, waitMs: 30000 })\` 等待结果，结果会自动回填到画布
 - 遇到 quota_exceeded 就停下来告诉用户，不要换参数重试，由用户在设置里调高 Agent 每日上限

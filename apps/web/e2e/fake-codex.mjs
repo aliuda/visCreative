@@ -336,6 +336,30 @@ async function runTurn(turnId, text) {
     }
     return replyNow(turnId, `Extracted settings; existing settings preserved: ${existing.join(', ')}`)
   }
+  const protectedLayout = text.match(/^canvas-layout-protected (.+)$/m)
+  if (protectedLayout) {
+    const { nodeId } = JSON.parse(protectedLayout[1])
+    const { nodes } = await workTool('canvas_get', { nodeIds: [nodeId] })
+    const node = nodes[0]
+    if (!node) throw new Error('The protected layout scenario needs an existing node')
+    const args = { ops: [{ op: 'node.layout', nodeId, x: node.x + 400 }] }
+    const item = { id: 'layout-protected', type: 'mcpToolCall', server: 'vis', tool: 'canvas_apply', arguments: args, status: 'inProgress' }
+    notify('item/started', { threadId: thread, turnId, item })
+    let failure
+    try { await workTool('canvas_apply', args) } catch (error) { failure = error }
+    if (!failure) throw new Error('Protected layout write succeeded')
+    notify('item/completed', { threadId: thread, turnId, item: { ...item, status: 'failed', result: { isError: true, content: [{ type: 'text', text: failure.message }] } } })
+    return replyNow(turnId, 'Completed canvas layout protection')
+  }
+  const organizeProposal = text.match(/^canvas-organize-proposal (.+)$/m)
+  if (organizeProposal) {
+    const args = JSON.parse(organizeProposal[1])
+    const item = { id: `organize-proposal-${crypto.randomUUID()}`, type: 'mcpToolCall', server: 'vis', tool: 'canvas_organize_propose', arguments: args, status: 'inProgress' }
+    notify('item/started', { threadId: thread, turnId, item })
+    const result = await workTool('canvas_organize_propose', args)
+    notify('item/completed', { threadId: thread, turnId, item: { ...item, status: 'completed', result: { content: [{ type: 'text', text: JSON.stringify(result) }] } } })
+    return replyNow(turnId, `Completed organize proposal: ${args.reason}`)
+  }
   const protectedWrite = text.match(/^scene-protected-write (.+)$/m)
   if (protectedWrite) {
     const payload = JSON.parse(protectedWrite[1])

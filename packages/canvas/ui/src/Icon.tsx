@@ -2,9 +2,18 @@ import type { NodeView } from '@vis/protocol'
 import type { ReactNode } from 'react'
 
 type IconKind = NodeView['kind'] | 'download' | 'organize' | 'document' | 'upload' | 'plus' | 'fit' | 'map' | 'generate' | 'close' | 'play' | 'pause' | 'volume' | 'muted' | 'loop' | 'fullscreen' | 'exitFullscreen'
+  | 'alignLeft' | 'alignCenter' | 'alignRight' | 'alignTop' | 'alignMiddle' | 'alignBottom' | 'distributeHorizontal' | 'distributeVertical'
 export function Icon({ kind, size = 20 }: { kind: IconKind; size?: number }) {
   const paths: Record<IconKind, ReactNode> = {
     download: <path d="M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4" />,
+    alignLeft: <><path d="M4 3v18" /><rect x="7" y="5" width="13" height="5" /><rect x="7" y="14" width="8" height="5" /></>,
+    alignCenter: <><path d="M12 2v20" /><rect x="3" y="5" width="18" height="5" /><rect x="7" y="14" width="10" height="5" /></>,
+    alignRight: <><path d="M20 3v18" /><rect x="4" y="5" width="13" height="5" /><rect x="9" y="14" width="8" height="5" /></>,
+    alignTop: <><path d="M3 4h18" /><rect x="5" y="7" width="5" height="13" /><rect x="14" y="7" width="5" height="8" /></>,
+    alignMiddle: <><path d="M2 12h20" /><rect x="5" y="3" width="5" height="18" /><rect x="14" y="7" width="5" height="10" /></>,
+    alignBottom: <><path d="M3 20h18" /><rect x="5" y="4" width="5" height="13" /><rect x="14" y="9" width="5" height="8" /></>,
+    distributeHorizontal: <><path d="M3 3v18M21 3v18M9 12h6" /><rect x="5" y="7" width="4" height="10" /><rect x="15" y="5" width="4" height="14" /></>,
+    distributeVertical: <><path d="M3 3h18M3 21h18M12 9v6" /><rect x="7" y="5" width="10" height="4" /><rect x="5" y="15" width="14" height="4" /></>,
     organize: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
     document: <><path d="M14 3H5v18h14V8Z M14 3v5h5M8 12h8M8 16h8" /></>,
     // 0023: a table, for the storyboard

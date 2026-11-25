@@ -1,9 +1,10 @@
 import type { CanvasOp, NodeView } from '@vis/protocol'
 import { useFormat, useMessages } from '@vis/ui-kit'
 import { controlMessages } from './messages'
+import type { OrganizePlan } from '@vis/canvas-layout'
 
 export function OrganizationPreview({ groups, ops, nodes }: {
-  groups: { frameId: string; category: string; nodeIds: string[]; x: number; y: number; w: number; h: number }[]
+  groups: OrganizePlan['groups']
   ops: CanvasOp[]
   nodes: NodeView[]
 }) {
@@ -22,13 +23,13 @@ export function OrganizationPreview({ groups, ops, nodes }: {
   })
   return <div className="vis-organization-preview" aria-label={m.organizationPreview}>
     <svg viewBox={`${left} ${top} ${width} ${height}`} role="img" aria-label={m.organizationPreviewImage}>
-      {groups.map(group => <g key={group.frameId}><rect x={group.x} y={group.y} width={group.w} height={group.h} rx={12} className="vis-preview-frame" /><text x={group.x + 24} y={group.y + 35}>{nodes.find(node => node.nodeId === group.frameId)?.frame?.title ?? group.category}</text></g>)}
+      {groups.map((group, index) => <g key={group.frameId ?? index}>{group.frameId ? <><rect x={group.x} y={group.y} width={group.w} height={group.h} rx={12} className="vis-preview-frame" /><text x={group.x + 24} y={group.y + 35}>{nodes.find(node => node.nodeId === group.frameId)?.frame?.title ?? group.title}</text></> : null}</g>)}
       {arranged.flatMap(node => [...new Set([...(node.inputs ?? []), ...node.slots.flatMap(slot => slot.source?.inputNodeIds ?? [])])].flatMap(id => {
         const source = arranged.find(node => node.nodeId === id)
         return source ? [<line key={`${id}-${node.nodeId}`} x1={source.x + source.w} y1={source.y + source.h / 2} x2={node.x} y2={node.y + node.h / 2} />] : []
       }))}
       {arranged.map(node => <rect key={node.nodeId} x={node.x} y={node.y} width={node.w} height={node.h} rx={8} className="vis-preview-node" />)}
     </svg>
-    <p>{groups.map(group => m.organizationGroupCount(group.category, format.number(group.nodeIds.length))).join(' · ')}</p>
+    <p>{groups.map(group => m.organizationGroupCount(group.title, format.number(group.nodeIds.length))).join(' · ')}</p>
   </div>
 }

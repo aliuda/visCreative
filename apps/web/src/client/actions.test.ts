@@ -4,18 +4,45 @@ import { canvasActions } from './actions'
 import { RpcError } from './rpc'
 import type { SpaceConnection } from './space'
 
-function setup(nodes: unknown[][]) {
+function setup(nodes: unknown[][], locale: 'en' | 'zh-CN' = 'zh-CN') {
   const call = vi.fn(async (method: string, _params?: unknown) => {
     if (method === 'canvas.get') return { nodes: nodes.shift() }
     if (method === 'canvas.apply') return { idMap: { n: 'new-node', 'copy-0': 'new-0', 'copy-1': 'new-1' }, eventSeq: 1 }
     return { jobId: 'job' }
   })
   const notify = vi.fn()
-  const actions = canvasActions({ rpc: { call }, getView: () => ({ space: { spaceId: 'project' }, ready: true, state: { seq: 1 } }) } as unknown as SpaceConnection, notify)
+  const actions = canvasActions({ rpc: { call }, getView: () => ({ space: { spaceId: 'project' }, ready: true, state: { seq: 1 } }) } as unknown as SpaceConnection, notify, locale)
   return { actions, call, notify }
 }
 
 describe('Canvas reference input actions', () => {
+  it('resolves only explicit author actions with the complete preview and preserves inline conflicts', async () => {
+    const { actions, call, notify } = setup([], 'en')
+    const params = { proposalId: 'proposal', action: 'apply' as const, removeEmptyFrames: false,
+      titles: { uncategorized: 'Uncategorized', untitledScript: 'Untitled script' }, description: 'Organize canvas', planDigest: 'preview-digest' }
+    call.mockResolvedValueOnce({ proposal: { status: 'applied' }, operationId: 'operation' } as any)
+    await actions.onResolveOrganize!(params)
+    expect(call).toHaveBeenCalledExactlyOnceWith('canvas.organize.resolve', { ...params, requestId: expect.any(String) })
+    expect(notify).not.toHaveBeenCalled()
+    const error = new RpcError('revision_conflict', 'Changed', { reason: 'canvas.organize_plan_changed' })
+    call.mockRejectedValueOnce(error)
+    await expect(actions.onResolveOrganize!(params)).rejects.toBe(error)
+    expect(notify).not.toHaveBeenCalled()
+    call.mockResolvedValueOnce({ proposal: { status: 'stale' } } as any)
+    await actions.onResolveOrganize!(params)
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ kind: 'info', text: 'There was nothing left to organize.' })
+  })
+  it('sends the preview digest through canvas.organize and preserves inline failures', async () => {
+    const { actions, call, notify } = setup([])
+    const params = { mode: 'script' as const, columns: 'auto' as const, removeEmptyFrames: true,
+      titles: { uncategorized: 'Uncategorized', untitledScript: 'Untitled script' }, planDigest: 'preview-digest' }
+    await actions.onOrganize!(params)
+    expect(call).toHaveBeenCalledExactlyOnceWith('canvas.organize', { ...params, requestId: expect.any(String) })
+    const error = new RpcError('revision_conflict', 'Changed', { reason: 'canvas.organize_plan_changed' })
+    call.mockRejectedValueOnce(error)
+    await expect(actions.onOrganize!(params)).rejects.toBe(error)
+    expect(notify).not.toHaveBeenCalled()
+  })
   it('duplicates the entire scene document into the new main slot', async () => {
     const doc: SceneDoc = {
       ...EMPTY_SCENE, rev: 3,
